@@ -1,4 +1,7 @@
 from dataclasses import dataclass, field
+from link.extract_links import URLExtractor
+
+url_extractor = URLExtractor() 
 
 @dataclass
 class Post:
@@ -7,6 +10,9 @@ class Post:
     text: str
     reference_sources:list = field(default_factory=list)
     similar_claims:list = field(default_factory=list)
+
+    def __post_init__(self):
+        urls = url_extractor.transform(self.text)
 
 @dataclass
 class ReferenceSource:
