@@ -1,6 +1,6 @@
-from logger import logger
-from data_reader import read_constraint_splits
-from annotate import annotate
+from .logger import logger
+from .data_reader import read_constraint_splits
+from .annotate import annotate
 
 
 if __name__ == "__main__":
