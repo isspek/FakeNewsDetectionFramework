@@ -1,16 +1,16 @@
 from urlextract import URLExtract
 from url_normalize import url_normalize
 import requests
-from cachetools import cached, TTLCache
 from ..logger import logger
 import tldextract
+from ..utils import cache
 
 
 class URLExtractor:
     def __init__(self):
         self.extractor = URLExtract()
 
-    @cached(cache=TTLCache(maxsize=1024, ttl=600))
+    @cache.memoize(typed=True, expire=1, tag='url_normalize')
     def normalize(self, url):
         if url.endswith('.'):
             url = url[: -1]
@@ -23,7 +23,6 @@ class URLExtractor:
             logger.error('Error {e} {url}'.format(e=e, url=url))
             return 'invalid_url'
 
-    @cached(cache=TTLCache(maxsize=1024, ttl=600))
     def extract_url_metadata(self, url: str):
         res = tldextract.extract(url)
         return {'subdomain': res.subdomain,
