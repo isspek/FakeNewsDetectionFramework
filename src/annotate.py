@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from .link.processor import URLExtractor
+from .logger import logger
 
 url_extractor = URLExtractor()
 
@@ -16,6 +17,7 @@ class Post:
         urls = url_extractor.transform(self.text)
         for url in urls:
             url_metadata = url_extractor.extract_url_metadata(url)
+            logger.info('extracting referred sources...')
             self.linked_urls.append(ReferenceSource(
                 subdomain=url_metadata['subdomain'],
                 domain=url_metadata['domain'],
