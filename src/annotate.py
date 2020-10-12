@@ -14,13 +14,23 @@ class Post:
 
     def __post_init__(self):
         urls = url_extractor.transform(self.text)
-        print(urls)
+        for url in urls:
+            url_metadata = url_extractor.extract_url_metadata(url)
+            self.linked_urls.append(ReferenceSource(
+                subdomain=url_metadata['subdomain'],
+                domain=url_metadata['domain'],
+                suffix=url_metadata['suffix'],
+                alias=url_metadata['alias']
+            ))
 
 
 @dataclass
 class ReferenceSource:
+    subdomain: str
     domain: str
-    label: str
+    suffix: str
+    alias: str
+    label: str = 'notclassified'
 
 
 def annotate(dataframe_obj):
