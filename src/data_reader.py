@@ -82,9 +82,13 @@ def process_nela(nela_2018_path: str, nela_2019_path: str):
     satire_nela_2018 = nela_2018[nela_2018.source.isin(satire_sources)]
 
     reliable_merged = pd.concat([reliable_nela_2018, reliable_nela_2019])[['source', 'title', 'content']]
+    reliable_merged['label'] = 'reliable'
     mixed_merged = pd.concat([mixed_nela_2018, mixed_nela_2019])[['source', 'title', 'content']]
+    mixed_merged['label'] = 'mixed'
     unreliable_merged = pd.concat([unreliable_nela_2018, unreliable_nela_2019])[['source', 'title', 'content']]
+    unreliable_merged['label'] = 'unreliable'
     satire_merged = pd.concat([satire_nela_2018, satire_nela_2019])[['source', 'title', 'content']]
+    satire_merged['label'] = 'satire'
     reliable_merged = resample_sources(reliable_merged)
     mixed_merged = resample_sources(mixed_merged)
     unreliable_merged = resample_sources(unreliable_merged)
@@ -125,7 +129,7 @@ def resample_sources(sources):
     sources = sources.groupby('source').filter(lambda x: x['title'].count() > 9)
     sources.reset_index(drop=True, inplace=True)  # reset index
     sources = sources.groupby('source').apply(
-        lambda x: x.sample(n=100) if len(x) > 100 else x).reset_index(drop=True)
+        lambda x: x.sample(n=200) if len(x) > 200 else x).reset_index(drop=True)
     return sources
 
 
