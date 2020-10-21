@@ -3,3 +3,6 @@ urlextract==1.1.0
 url-normalize==1.4.2
 tldextract==2.2.3
 diskcache==5.0.3
+transformers == 3.0.12
+torch == 1.6.0
+sklearn == 0.23.2
