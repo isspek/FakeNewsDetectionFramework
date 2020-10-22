@@ -10,7 +10,7 @@ FOLD = 5
 NELA_DIR = DATA_DIR / 'NELA'
 Path(NELA_DIR).mkdir(parents=True, exist_ok=True)
 NELA_FNAME = '{mode}_{fold}.tsv'
-
+RESAMPLE_LIMIT = 100
 
 def read_constraint_splits():
     train_fpath = DATA_DIR / 'train.tsv'
@@ -129,7 +129,7 @@ def resample_sources(sources):
     sources = sources.groupby('source').filter(lambda x: x['title'].count() > 9)
     sources.reset_index(drop=True, inplace=True)  # reset index
     sources = sources.groupby('source').apply(
-        lambda x: x.sample(n=200) if len(x) > 200 else x).reset_index(drop=True)
+        lambda x: x.sample(n=RESAMPLE_LIMIT) if len(x) > RESAMPLE_LIMIT else x).reset_index(drop=True)
     return sources
 
 

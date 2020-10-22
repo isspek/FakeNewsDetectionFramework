@@ -6,3 +6,4 @@ diskcache==5.0.3
 transformers == 3.0.12
 torch == 1.6.0
 sklearn == 0.23.2
+clean-text==0.3.0
