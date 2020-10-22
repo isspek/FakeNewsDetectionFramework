@@ -1,0 +1,1 @@
+python -m src.data_reader --nela_2018 /data/isspek/nela-2018/ --nela_2019 /data/isspek/nela-2019/
