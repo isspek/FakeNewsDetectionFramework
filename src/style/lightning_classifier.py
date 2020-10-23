@@ -488,7 +488,7 @@ if __name__ == "__main__":
     # TODO end: remove this later
 
     # start : get training steps
-    d = ConstraintData(args)
+    d = NELAData(args)
     d.prepare_data()
     d.setup()
     args.num_training_steps = len(d.train_dataloader()) * args.max_epochs
