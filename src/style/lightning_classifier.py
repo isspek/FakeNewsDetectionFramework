@@ -46,14 +46,8 @@ class Model(pl.LightningModule):
         super().__init__()
 
         self.save_hyperparameters()
-        # a very useful feature of pytorch lightning  which leads to the named variables that are passed in
-        # being available as self.hparams.<variable_name> We use this when refering to eg
-        # self.hparams.learning_rate
-
         # freeze
         self._frozen = False
-
-        # eg https://github.com/stefan-it/turkish-bert/issues/5
         config = AutoConfig.from_pretrained(self.hparams.pretrained,
                                             num_labels=self.hparams.num_labels,
                                             output_attentions=False,
@@ -61,54 +55,17 @@ class Model(pl.LightningModule):
 
         self.model = AutoModelForSequenceClassification.from_pretrained(self.hparams.pretrained, config=config)
 
-        # Possible choices for pretrained are:
-        # distilbert-base-uncased
-        # bert-base-uncased
-
-        # The BERT paper says: "[The] pre-trained BERT model can be fine-tuned with just one additional output
-        # layer to create state-of-the-art models for a wide range of tasks, such as question answering and
-        # language inference, without substantial task-specific architecture modifications."
-        #
-        # Huggingface/transformers provides access to such pretrained model versions, some of which have been
-        # published by various community members.
-        #
-        # BertForSequenceClassification is one of those pretrained models, which is loaded automatically by
-        # AutoModelForSequenceClassification because it corresponds to the pretrained weights of
-        # "bert-base-uncased".
-        #
-        # Huggingface says about BertForSequenceClassification: Bert Model transformer with a sequence
-        # classification/regression head on top (a linear layer on top of the pooled output) e.g. for GLUE
-        # tasks."
-
-        # This part is easy  we instantiate the pretrained model (checkpoint)
-
-        # But it's also incredibly important, e.g. by using "bert-base-uncased, we determine, that that model
-        # does not distinguish between lower and upper case. This might have a significant impact on model
-        # performance!!!
-
     def forward(self, batch):
-        # there are some choices, as to how you can define the input to the forward function I prefer it this
-        # way, where the batch contains the input_ids, the input_put_mask and sometimes the labels (for
-        # training)
-
         b_input_ids = batch[0]
         b_input_mask = batch[1]
 
         has_labels = len(batch) > 2
 
         b_labels = batch[2] if has_labels else None
-
-        # there are labels in the batch, this indicates: training for the BertForSequenceClassification model:
-        # it means that the model returns tuple, where the first element is the training loss and the second
-        # element is the logits
         if has_labels:
             loss, logits = self.model(b_input_ids,
                                       attention_mask=b_input_mask,
                                       labels=b_labels)
-
-        # there are labels in the batch, this indicates: prediction for the BertForSequenceClassification
-        # model: it means that the model returns simply the logits
-
         if not has_labels:
             loss, logits = None, self.model(b_input_ids,
                                             attention_mask=b_input_mask,
@@ -117,9 +74,6 @@ class Model(pl.LightningModule):
         return loss, logits
 
     def training_step(self, batch, batch_nb):
-        # the training step is a (virtual) method,specified in the interface, that the pl.LightningModule
-        # class stipulates you to overwrite. This we do here, by virtue of this definition
-
         loss, logits = self(
             batch
         )  # self refers to the model, which in turn acceses the forward method
@@ -375,6 +329,121 @@ class ConstraintData(pl.LightningDataModule):
             shuffle=False)
 
 
+class NELAData(pl.LightningDataModule):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+        # self.save_hyperparameters()
+        if isinstance(args, tuple): args = args[0]
+        self.hparams = args
+        # cf this open issue: https://github.com/PyTorchLightning/pytorch-lightning/issues/3232
+
+        print('args:', args)
+        print('kwargs:', kwargs)
+
+        # print(f'self.hparams.pretrained:{self.hparams.pretrained}')
+
+        print('Loading BERT tokenizer')
+        print(f'PRETRAINED:{self.hparams.pretrained}')
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.pretrained)
+
+        print('Type tokenizer:', type(self.tokenizer))
+
+        self.labels2id = {'reliable': 0, 'unreliable': 1, 'satire': 2}
+        self.id2labels = {val: key for key, val in self.labels2id.items()}
+
+    def prepare_data(self):
+        # Even if you have a complicated setup, where you train on a cluster of multiple GPUs, prepare_data is
+        # only run once on the cluster.
+
+        # Typically - as done here - prepare_data just performs the time-consuming step of downloading the
+        # data.
+        pass
+
+    def setup(self, stage=None):
+        # Even if you have a complicated setup, where you train on a cluster of multiple GPUs, setup is run
+        # once on every gpu of the cluster.
+
+        # typically - as done here - setup
+        # - reads the previously downloaded data
+        # - does some preprocessing such as tokenization
+
+        # Load the dataset into a pandas dataframe.
+        train_df = pd.read_csv(self.hparams.nela_train, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.nela_test, delimiter='\t')
+
+        # Stats of dataset
+        logger.info(f'Total samples in training: {len(train_df)}')
+        logger.info(f'Total samples in validation: {len(val_df)}')
+
+        # Get the lists of sentences and their labels.
+        train_tweets = train_df.tweet.tolist()
+        train_labels = train_df.label.tolist()
+
+        # tokenize the sentences with Transformer tokens
+        train_encoded_tweets = self.tokenizer(
+            train_tweets,  # Sentence to encode.
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=self.hparams.max_len,  # Pad & truncate all sentences.
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors='pt'  # Return pytorch tensors.
+        )
+
+        # Convert the lists into tensors.
+        train_input_ids = train_encoded_tweets['input_ids']
+        train_attention_mask = train_encoded_tweets['attention_mask']
+        train_labels = torch.tensor([self.labels2id[i] for i in train_labels])
+
+        # Combine the training inputs into a TensorDataset.
+        self.train_dataset = TensorDataset(train_input_ids, train_attention_mask, train_labels)
+
+        val_tweets = val_df.tweet.tolist()
+        val_labels = val_df.label.tolist()
+
+        # tokenize the sentences with Transformer tokens
+        val_encoded_tweets = self.tokenizer(
+            val_tweets,  # Sentence to encode.
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=self.hparams.max_len,  # Pad & truncate all sentences.
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors='pt'  # Return pytorch tensors.
+        )
+
+        # Convert the lists into tensors.
+        val_input_ids = val_encoded_tweets['input_ids']
+        val_attention_mask = train_encoded_tweets['attention_mask']
+        val_labels = torch.tensor([self.labels2id[i] for i in val_labels])
+
+        # Combine the training inputs into a TensorDataset.
+        self.val_dataset = TensorDataset(val_input_ids, val_attention_mask, val_labels)
+
+    def train_dataloader(self):
+        # as explained above, train_dataloader was previously part of the model class derived from
+        # pl.LightningModule train_dataloader needs to return the a Dataloader with the train_dataset
+
+        return DataLoader(
+            self.train_dataset,  # The training samples.
+            sampler=RandomSampler(
+                self.train_dataset),  # Select batches randomly
+            batch_size=self.hparams.batch_size  # Trains with this batch size.
+        )
+
+    def val_dataloader(self):
+        # as explained above, train_dataloader was previously part of the model class derived from
+        # pl.LightningModule train_dataloader needs to return the a Dataloader with the val_dataset
+
+        return DataLoader(
+            self.val_dataset,  # The training samples.
+            sampler=RandomSampler(self.val_dataset),  # Select batches randomly
+            batch_size=self.hparams.batch_size,  # Trains with this batch size.
+            shuffle=False)
+
+
 # %%
 if __name__ == "__main__":
     # Two key aspects:
@@ -405,6 +474,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=float, default=32)
     parser.add_argument('--learning_rate', type=float, default=2e-5)
     parser.add_argument('--gradient_clip_val', type=float, default=0)
+    parser.add_argument('--nela_train', type=str, default='NELA/train_1.tsv')
+    parser.add_argument('--nela_test', type=str, default='NELA/test_1.tsv')
 
     # parser = Model.add_model_specific_args(parser) parser = Data.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
