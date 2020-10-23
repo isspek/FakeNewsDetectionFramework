@@ -24,7 +24,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 from src.logger import logger
 from cleantext import clean
 
-def clean_helper(self, text):
+def clean_helper(text):
     return clean(text,
                  fix_unicode=True,  # fix various unicode errors
                  to_ascii=True,  # transliterate to closest ASCII representation
