@@ -22,7 +22,29 @@ from transformers import get_linear_schedule_with_warmup
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 from src.logger import logger
+from cleantext import clean
 
+def clean_helper(self, text):
+    return clean(text,
+                 fix_unicode=True,  # fix various unicode errors
+                 to_ascii=True,  # transliterate to closest ASCII representation
+                 no_urls=True,  # replace all URLs with a special token
+                 no_emails=True,
+                 lower=True,
+                 # replace all email addresses with a special token
+                 no_phone_numbers=True,
+                 # replace all phone numbers with a special token
+                 no_numbers=True,  # replace all numbers with a special token
+                 no_digits=True,  # replace all digits with a special token
+                 no_currency_symbols=True,
+                 # replace all currency symbols with a special token
+                 replace_with_url="<URL>",
+                 replace_with_email="<EMAIL>",
+                 replace_with_phone_number="<PHONE>",
+                 replace_with_number="<NUMBER>",
+                 replace_with_digit="<DIGIT>",
+                 replace_with_currency_symbol="<CUR>",
+                 lang="en")
 
 # Acknowledgement: The original version of the following code is https://arthought.com/transformer-model-fine-tuning-for-text-classification-with-pytorch-lightning/
 # I have modified a bit.
@@ -378,12 +400,14 @@ class NELAData(pl.LightningDataModule):
         logger.info(f'Total samples in validation: {len(val_df)}')
 
         # Get the lists of sentences and their labels.
-        train_tweets = train_df.tweet.tolist()
+        train_title = train_df.title.map(lambda x: clean_helper(x)).tolist()
+        train_content = train_df.content.map(lambda x: clean_helper(x)).tolist()
         train_labels = train_df.label.tolist()
+        train_labels = torch.tensor([self.labels2id[i] for i in train_labels])
 
         # tokenize the sentences with Transformer tokens
         train_encoded_tweets = self.tokenizer(
-            train_tweets,  # Sentence to encode.
+            train_title,train_content,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
             max_length=self.hparams.max_len,  # Pad & truncate all sentences.
             padding='max_length',
