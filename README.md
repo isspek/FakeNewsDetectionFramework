@@ -1,4 +1,4 @@
-# CONSTRAINT-AAAI2021
+# Fake News Detection Framework
 
 Run the main code `python -m src.cli`
 
