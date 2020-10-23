@@ -497,7 +497,6 @@ if __name__ == "__main__":
     parser.add_argument('--pretrained', type=str, default="bert-base-uncased")
     parser.add_argument('--batch_size', type=float, default=32)
     parser.add_argument('--learning_rate', type=float, default=2e-5)
-    parser.add_argument('--gradient_clip_val', type=float, default=0)
     parser.add_argument('--nela_train', type=str, default='NELA/train_1.tsv')
     parser.add_argument('--nela_test', type=str, default='NELA/test_1.tsv')
 
