@@ -208,13 +208,13 @@ class Model(pl.LightningModule):
 
         self._frozen = False
 
-    def on_epoch_start(self):
-        """pytorch lightning hook"""
-        if self.current_epoch < self.hparams.nr_frozen_epochs:
-            self.freeze()
+    # def on_epoch_start(self):
+    #     """pytorch lightning hook"""
+    #     if self.current_epoch < self.hparams.nr_frozen_epochs:
+    #         self.freeze()
 
-        if self.current_epoch >= self.hparams.nr_frozen_epochs:
-            self.unfreeze()
+    #     if self.current_epoch >= self.hparams.nr_frozen_epochs:
+    #         self.unfreeze()
 
 
 class ConstraintData(pl.LightningDataModule):
@@ -421,7 +421,7 @@ class NELAData(pl.LightningDataModule):
         # Convert the lists into tensors.
         train_input_ids = train_encoded_tweets['input_ids']
         train_attention_mask = train_encoded_tweets['attention_mask']
-        train_labels = torch.tensor([self.labels2id[i] for i in train_labels])
+        # train_labels = torch.tensor([self.labels2id[i] for i in train_labels])
 
         # Combine the training inputs into a TensorDataset.
         self.train_dataset = TensorDataset(train_input_ids, train_attention_mask, train_labels)
@@ -445,8 +445,8 @@ class NELAData(pl.LightningDataModule):
 
         # Convert the lists into tensors.
         val_input_ids = val_encoded_tweets['input_ids']
-        val_attention_mask = train_encoded_tweets['attention_mask']
-        val_labels = torch.tensor([self.labels2id[i] for i in val_labels])
+        val_attention_mask = val_encoded_tweets['attention_mask']
+        # val_labels = torch.tensor([self.labels2id[i] for i in val_labels])
 
         # Combine the training inputs into a TensorDataset.
         self.val_dataset = TensorDataset(val_input_ids, val_attention_mask, val_labels)
@@ -500,9 +500,10 @@ if __name__ == "__main__":
     # Similarly BertTokenizer is one of those tokenizers, which is loaded automatically by AutoTokenizer
     # because it is the necessary tokenizer for the pretrained weights of "bert-base-uncased".
     parser.add_argument('--pretrained', type=str, default="bert-base-uncased")
-    parser.add_argument('--batch_size', type=float, default=32)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--learning_rate', type=float, default=2e-5)
     parser.add_argument('--max_len', type=int, default=128)
+    parser.add_argument('--num_labels', type=int, default=3)
     parser.add_argument('--nela_train', type=str, default='NELA/train_1.tsv')
     parser.add_argument('--nela_test', type=str, default='NELA/test_1.tsv')
 
