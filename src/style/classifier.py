@@ -28,7 +28,7 @@ class NELADataset(Dataset):
         data['label'] = data.label.map(lambda x: self.str2id[x])
         title, content = data['title'].tolist(), data['content'].tolist()
         self.encodings = tokenizer(title, content, padding=True, truncation=True, verbose=False,
-                                   return_tensors='pt', max_length=512)
+                                   return_tensors='pt', max_length=512, add_special_tokens=True)
 
         self.labels = data['label'].tolist()
 
@@ -86,7 +86,8 @@ class Transformer(Model):
         train_dataset = NELADataset(train_dir, self.tokenizer)
         logger.info(f'Training samples: {train_dataset.__len__()}')
         model = AutoModelForSequenceClassification.from_pretrained(self.model_name, num_labels=train_dataset.num_labels)
-        temp_dir = Path(self.output_dir) / 'temp'
+        temp_dir = self.output_dir / 'temp'
+        temp_dir = temp_dir.absolute().as_posix()
         training_args = TrainingArguments(
             output_dir=temp_dir,  # output directory
             overwrite_output_dir=True,
@@ -110,7 +111,7 @@ class Transformer(Model):
             args=training_args,  # training arguments, defined above
             train_dataset=train_dataset,  # training dataset
         )
-
+        trainer.train()
         shutil.rmtree(temp_dir)
         trainer.save_model(self.output_dir)
 
