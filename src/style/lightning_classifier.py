@@ -24,6 +24,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 from src.logger import logger
 from cleantext import clean
 
+
 def clean_helper(text):
     return clean(text,
                  fix_unicode=True,  # fix various unicode errors
@@ -45,6 +46,7 @@ def clean_helper(text):
                  replace_with_digit="<DIGIT>",
                  replace_with_currency_symbol="<CUR>",
                  lang="en")
+
 
 # Acknowledgement: The original version of the following code is https://arthought.com/transformer-model-fine-tuning-for-text-classification-with-pytorch-lightning/
 # I have modified a bit.
@@ -407,7 +409,7 @@ class NELAData(pl.LightningDataModule):
 
         # tokenize the sentences with Transformer tokens
         train_encoded_tweets = self.tokenizer(
-            train_title,train_content,  # Sentence to encode.
+            train_title, train_content,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
             max_length=self.hparams.max_len,  # Pad & truncate all sentences.
             padding='max_length',
@@ -424,12 +426,15 @@ class NELAData(pl.LightningDataModule):
         # Combine the training inputs into a TensorDataset.
         self.train_dataset = TensorDataset(train_input_ids, train_attention_mask, train_labels)
 
-        val_tweets = val_df.tweet.tolist()
+        # Get the lists of sentences and their labels.
+        val_title = val_df.title.map(lambda x: clean_helper(x)).tolist()
+        val_content = val_df.content.map(lambda x: clean_helper(x)).tolist()
         val_labels = val_df.label.tolist()
+        val_labels = torch.tensor([self.labels2id[i] for i in val_labels])
 
         # tokenize the sentences with Transformer tokens
         val_encoded_tweets = self.tokenizer(
-            val_tweets,  # Sentence to encode.
+            val_title, val_content,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
             max_length=self.hparams.max_len,  # Pad & truncate all sentences.
             padding='max_length',
