@@ -1,244 +1,371 @@
-import pandas as pd
 import torch
-from torch.utils.data import TensorDataset
-from torch.utils.data import RandomSampler
-from torch.utils.data import DataLoader
-
-from transformers import AutoTokenizer
+import os
+import numpy as np
 from transformers import AutoModelForSequenceClassification
 from transformers import AutoConfig
-
 from transformers import AdamW
 from transformers import get_linear_schedule_with_warmup
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
-from src.logger import logger
-from cleantext import clean
+import argparse
+from argparse import ArgumentParser
+from .data_models import DATA_MODELS
+from pathlib import Path
+from transformers import PretrainedConfig
+from transformers.optimization import get_linear_schedule_with_warmup
+from typing import Any, Dict
+from pytorch_lightning.utilities import rank_zero_info
+from transformers.data.metrics import simple_accuracy
 
-
-def clean_helper(text):
-    return clean(text,
-                 fix_unicode=True,  # fix various unicode errors
-                 to_ascii=True,  # transliterate to closest ASCII representation
-                 no_urls=True,  # replace all URLs with a special token
-                 no_emails=True,
-                 lower=True,
-                 # replace all email addresses with a special token
-                 no_phone_numbers=True,
-                 # replace all phone numbers with a special token
-                 no_numbers=True,  # replace all numbers with a special token
-                 no_digits=True,  # replace all digits with a special token
-                 no_currency_symbols=True,
-                 # replace all currency symbols with a special token
-                 replace_with_url="<URL>",
-                 replace_with_email="<EMAIL>",
-                 replace_with_phone_number="<PHONE>",
-                 replace_with_number="<NUMBER>",
-                 replace_with_digit="<DIGIT>",
-                 replace_with_currency_symbol="<CUR>",
-                 lang="en")
-
-
-# Acknowledgement: The original version of the following code is https://arthought.com/transformer-model-fine-tuning-for-text-classification-with-pytorch-lightning/
-# I have modified a bit.
-
-# End : Import the packages
-# %%
-# Remark: pl.LightningModule is derived from torch.nn.Module It has additional methods that are part of the
-# lightning interface and that need to be defined by the user. Having these additional methods is very useful
-# for several reasons:
-# 1. Reasonable Expectations: Once you know the pytorch-lightning-system you more easily read other people's
-#    code, because it is always structured in the same way
-# 2. Less Boilerplate: The additional class methods make pl.LightningModule more powerful than the nn.Module
-#    from plain pytorch. This means you have to write less of the repetitive boilerplate code
-# 3. Perfact for the development lifecycle Pytorch Lightning makes it very easy to switch from cpu to gpu/tpu.
-#    Further it supplies method to quickly run your code on a fraction of the data, which is very useful in
-#    the development process, especially for debugging
-
-
-class Model(pl.LightningModule):
-    def __init__(self, *args, **kwargs):
+# the following class is based on transformers/example (https://github.com/huggingface/transformers/blob/38f6739cd6c1725ecd75a40d5371483f738097c2/examples/lightning_base.py#L61)
+class TransformerModel(pl.LightningModule):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            num_labels=None,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
         super().__init__()
+        # TODO: move to self.save_hyperparameters()
+        # self.save_hyperparameters()
+        # can also expand arguments into trainer signature for easier reading
 
-        self.save_hyperparameters()
-        # freeze
-        self._frozen = False
-        config = AutoConfig.from_pretrained(self.hparams.pretrained,
-                                            num_labels=self.hparams.num_labels,
-                                            output_attentions=False,
-                                            output_hidden_states=False)
+        self.save_hyperparameters(hparams)
+        self.step_count = 0
+        self.output_dir = Path(self.hparams.output_dir)
+        cache_dir = self.hparams.cache_dir if self.hparams.cache_dir else None
+        if config is None:
+            self.config = AutoConfig.from_pretrained(
+                self.hparams.config_name if self.hparams.config_name else self.hparams.model_name_or_path,
+                **({"num_labels": num_labels} if num_labels is not None else {}),
+                cache_dir=cache_dir,
+                **config_kwargs,
+            )
+        else:
+            self.config: PretrainedConfig = config
 
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.hparams.pretrained, config=config)
+        extra_model_params = ("encoder_layerdrop", "decoder_layerdrop", "dropout", "attention_dropout")
+        for p in extra_model_params:
+            if getattr(self.hparams, p, None):
+                assert hasattr(self.config, p), f"model config doesn't have a `{p}` attribute"
+                setattr(self.config, p, getattr(self.hparams, p))
 
-    def forward(self, batch):
-        b_input_ids = batch[0]
-        b_input_mask = batch[1]
+        self.model_type = AutoModelForSequenceClassification
+        if model is None:
+            self.model = self.model_type.from_pretrained(
+                self.hparams.model_name_or_path,
+                from_tf=bool(".ckpt" in self.hparams.model_name_or_path),
+                config=self.config,
+                cache_dir=cache_dir,
+            )
+        else:
+            self.model = model
 
-        has_labels = len(batch) > 2
+    def training_step(self, batch, batch_idx):
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
 
-        b_labels = batch[2] if has_labels else None
-        if has_labels:
-            loss, logits = self.model(b_input_ids,
-                                      attention_mask=b_input_mask,
-                                      labels=b_labels)
-        if not has_labels:
-            loss, logits = None, self.model(b_input_ids,
-                                            attention_mask=b_input_mask,
-                                            labels=b_labels)
+        if self.config.model_type != "distilbert":
+            inputs["token_type_ids"] = batch[2] if self.config.model_type in ["bert", "xlnet", "albert"] else None
 
-        return loss, logits
+        outputs = self(**inputs)
+        loss = outputs[0]
 
-    def training_step(self, batch, batch_nb):
-        loss, logits = self(
-            batch
-        )  # self refers to the model, which in turn acceses the forward method
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
 
-        tensorboard_logs = {'train_loss': loss}
-        # pytorch lightning allows you to use various logging facilities, eg tensorboard with tensorboard we
-        # can track and easily visualise the progress of training. In this case
+    def load_hf_checkpoint(self, *args, **kwargs):
+        self.model = self.model_type.from_pretrained(*args, **kwargs)
 
-        return {'loss': loss, 'log': tensorboard_logs}
-        # the training_step method expects a dictionary, which should at least contain the loss
-
-    def validation_step(self, batch, batch_nb):
-        # the training step is a (virtual) method,specified in the interface, that the pl.LightningModule
-        # class  wants you to overwrite, in case you want to do validation. This we do here, by virtue of this
-        # definition.
-
-        loss, logits = self(batch)
-        # self refers to the model, which in turn accesses the forward method
-
-        # Apart from the validation loss, we also want to track validation accuracy  to get an idea, what the
-        # model training has achieved "in real terms".
-
-        labels = batch[2]
-        predictions = torch.argmax(logits, dim=1)
-        accuracy = (labels == predictions).float().mean()
-
-        return {'val_loss': loss, 'accuracy': accuracy}
-        # the validation_step method expects a dictionary, which should at least contain the val_loss
-
-    def validation_epoch_end(self, validation_step_outputs):
-        # OPTIONAL The second parameter in the validation_epoch_end - we named it validation_step_outputs -
-        # contains the outputs of the validation_step, collected for all the batches over the entire epoch.
-
-        # We use it to track progress of the entire epoch, by calculating averages
-
-        avg_loss = torch.stack([x['val_loss']
-                                for x in validation_step_outputs]).mean()
-
-        avg_accuracy = torch.stack(
-            [x['accuracy'] for x in validation_step_outputs]).mean()
-
-        tensorboard_logs = {'val_loss': avg_loss, 'val_accuracy': avg_accuracy}
-        return {
-            'val_loss': avg_loss,
-            'log': tensorboard_logs,
-            'progress_bar': {
-                'avg_loss': avg_loss,
-                'avg_accuracy': avg_accuracy
-            }
-        }
-        # The training_step method expects a dictionary, which should at least contain the val_loss. We also
-        # use it to include the log - with the tensorboard logs. Further we define some values that are
-        # displayed in the tqdm-based progress bar.
+    def get_lr_scheduler(self):
+        scheduler = get_linear_schedule_with_warmup(
+            self.opt, num_warmup_steps=self.hparams.warmup_steps, num_training_steps=self.total_steps()
+        )
+        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
+        return scheduler
 
     def configure_optimizers(self):
-        # The configure_optimizers is a (virtual) method, specified in the interface, that the
-        # pl.LightningModule class wants you to overwrite.
+        """Prepare optimizer and schedule (linear warmup and decay)"""
+        model = self.model
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": self.hparams.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
 
-        # In this case we define that some parameters are optimized in a different way than others. In
-        # particular we single out parameters that have 'bias', 'LayerNorm.weight' in their names. For those
-        # we do not use an optimization technique called weight decay.
+        optimizer = AdamW(
+            optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
+        )
+        self.opt = optimizer
 
-        no_decay = ['bias', 'LayerNorm.weight']
-
-        optimizer_grouped_parameters = [{
-            'params': [
-                p for n, p in self.named_parameters()
-                if not any(nd in n for nd in no_decay)
-            ],
-            'weight_decay':
-                0.01
-        }, {
-            'params': [
-                p for n, p in self.named_parameters()
-                if any(nd in n for nd in no_decay)
-            ],
-            'weight_decay':
-                0.0
-        }]
-        optimizer = AdamW(optimizer_grouped_parameters,
-                          lr=self.hparams.learning_rate,
-                          eps=1e-8
-                          # args.adam_epsilon  - default is 1e-8.
-                          )
-
-        # We also use a scheduler that is supplied by transformers.
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=0,
-            # Default value in run_glue.py
-            num_training_steps=self.hparams.num_training_steps)
+        scheduler = self.get_lr_scheduler()
 
         return [optimizer], [scheduler]
 
-    def freeze(self) -> None:
-        # freeze all layers, except the final classifier layers
-        for name, param in self.model.named_parameters():
-            if 'classifier' not in name:  # classifier layer
-                param.requires_grad = False
+    def forward(self, **inputs):
+        return self.model(**inputs)
 
-        self._frozen = True
+    def validation_step(self, batch, batch_idx):
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
 
-    def unfreeze(self) -> None:
-        if self._frozen:
-            for name, param in self.model.named_parameters():
-                if 'classifier' not in name:  # classifier layer
-                    param.requires_grad = True
+        if self.config.model_type != "distilbert":
+            inputs["token_type_ids"] = batch[2] if self.config.model_type in ["bert", "xlnet", "albert"] else None
 
-        self._frozen = False
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
 
-    # def on_epoch_start(self):
-    #     """pytorch lightning hook"""
-    #     if self.current_epoch < self.hparams.nr_frozen_epochs:
-    #         self.freeze()
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
 
-    #     if self.current_epoch >= self.hparams.nr_frozen_epochs:
-    #         self.unfreeze()
+    def _eval_end(self, outputs) -> tuple:
+        val_loss_mean = torch.stack([x["val_loss"] for x in outputs]).mean().detach().cpu().item()
+        preds = np.concatenate([x["pred"] for x in outputs], axis=0)
+
+        preds = np.argmax(preds, axis=1)
+
+        out_label_ids = np.concatenate([x["target"] for x in outputs], axis=0)
+        out_label_list = [[] for _ in range(out_label_ids.shape[0])]
+        preds_list = [[] for _ in range(out_label_ids.shape[0])]
+
+        results = {**{"val_loss": val_loss_mean}, **{"acc": simple_accuracy(preds, out_label_ids)}}
+
+        ret = {k: v for k, v in results.items()}
+        ret["log"] = results
+        return ret, preds_list, out_label_list
+
+    def validation_epoch_end(self, outputs: list) -> dict:
+        ret, preds, targets = self._eval_end(outputs)
+        logs = ret["log"]
+        return {"val_loss": logs["val_loss"], "log": logs, "progress_bar": logs}
+
+    def test_epoch_end(self, outputs) -> dict:
+        ret, predictions, targets = self._eval_end(outputs)
+        logs = ret["log"]
+        # `val_loss` is the key returned by `self._eval_end()` but actually refers to `test_loss`
+        return {"avg_test_loss": logs["val_loss"], "log": logs, "progress_bar": logs}
+
+    def test_step(self, batch, batch_nb):
+        return self.validation_step(batch, batch_nb)
+
+    def total_steps(self) -> int:
+        """The number of total training steps that will be run. Used for lr scheduler purposes."""
+        num_devices = max(1, self.hparams.gpus)  # TODO: consider num_tpu_cores
+        effective_batch_size = self.hparams.train_batch_size * self.hparams.accumulate_grad_batches * num_devices
+        return (self.dataset_size / effective_batch_size) * self.hparams.max_epochs
+
+    def _feature_file(self, mode):
+        return os.path.join(
+            self.hparams.data_dir,
+            "cached_{}_{}_{}".format(
+                mode,
+                list(filter(None, self.hparams.model_name_or_path.split("/"))).pop(),
+                str(self.hparams.max_seq_length),
+            ),
+        )
+
+    @pl.utilities.rank_zero_only
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        save_path = self.output_dir.joinpath("best_tfmr")
+        self.model.config.save_step = self.step_count
+        self.model.save_pretrained(save_path)
+        self.tokenizer.save_pretrained(save_path)
+
+    @staticmethod
+    def add_model_specific_args(parser, root_dir):
+        parser.add_argument(
+            "--model_name_or_path",
+            default=None,
+            type=str,
+            required=True,
+            help="Path to pretrained model or model identifier from huggingface.co/models",
+        )
+        parser.add_argument(
+            "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
+        )
+        parser.add_argument(
+            "--tokenizer_name",
+            default=None,
+            type=str,
+            help="Pretrained tokenizer name or path if not the same as model_name",
+        )
+        parser.add_argument(
+            "--cache_dir",
+            default="",
+            type=str,
+            help="Where do you want to store the pre-trained models downloaded from s3",
+        )
+        parser.add_argument(
+            "--encoder_layerdrop",
+            type=float,
+            help="Encoder layer dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--decoder_layerdrop",
+            type=float,
+            help="Decoder layer dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--dropout",
+            type=float,
+            help="Dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--attention_dropout",
+            type=float,
+            help="Attention dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
+        parser.add_argument(
+            "--lr_scheduler",
+            default="linear",
+            type=str,
+            help="Learning rate scheduler",
+        )
+        parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
+        parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+        parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
+        parser.add_argument("--num_workers", default=4, type=int, help="kwarg passed to DataLoader")
+        parser.add_argument("--num_train_epochs", dest="max_epochs", default=3, type=int)
+        parser.add_argument("--train_batch_size", default=32, type=int)
+        parser.add_argument("--eval_batch_size", default=32, type=int)
+        parser.add_argument("--adafactor", action="store_true")
 
 
+class LoggingCallback(pl.Callback):
+    def on_batch_end(self, trainer, pl_module):
+        lr_scheduler = trainer.lr_schedulers[0]["scheduler"]
+        lrs = {f"lr_group_{i}": lr for i, lr in enumerate(lr_scheduler.get_lr())}
+        pl_module.logger.log_metrics(lrs)
+
+    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        rank_zero_info("***** Validation results *****")
+        metrics = trainer.callback_metrics
+        # Log results
+        for key in sorted(metrics):
+            if key not in ["log", "progress_bar"]:
+                rank_zero_info("{} = {}\n".format(key, str(metrics[key])))
+
+    def on_test_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        rank_zero_info("***** Test results *****")
+        metrics = trainer.callback_metrics
+        # Log and save results to file
+        output_test_results_file = os.path.join(pl_module.hparams.output_dir, "test_results.txt")
+        with open(output_test_results_file, "w") as writer:
+            for key in sorted(metrics):
+                if key not in ["log", "progress_bar"]:
+                    rank_zero_info("{} = {}\n".format(key, str(metrics[key])))
+                    writer.write("{} = {}\n".format(key, str(metrics[key])))
 
 
+def add_generic_args(parser, root_dir) -> None:
+    #  To allow all pl args uncomment the following line
+    #  parser = pl.Trainer.add_argparse_args(parser)
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        type=str,
+        required=True,
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",
+    )
 
+    parser.add_argument(
+        "--fp16_opt_level",
+        type=str,
+        default="O2",
+        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
+             "See details at https://nvidia.github.io/apex/amp.html",
+    )
+    parser.add_argument("--n_tpu_cores", dest="tpu_cores", type=int)
+    parser.add_argument("--max_grad_norm", dest="gradient_clip_val", default=1.0, type=float, help="Max gradient norm")
+    parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
+    parser.add_argument("--do_predict", action="store_true", help="Whether to run predictions on the test set.")
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        dest="accumulate_grad_batches",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
+    parser.add_argument(
+        "--data_dir",
+        default=None,
+        type=str,
+        required=True,
+        help="The input data dir. Should contain the training files for the CoNLL-2003 NER task.",
+    )
+
+
+def generic_train(
+        model: TransformerModel,
+        args: argparse.Namespace,
+        early_stopping_callback=False,
+        logger=True,  # can pass WandbLogger() here
+        extra_callbacks=[],
+        checkpoint_callback=None,
+        logging_callback=None,
+        **extra_train_kwargs
+):
+    pl.seed_everything(args.seed)
+
+    # init model
+    odir = Path(model.hparams.output_dir)
+    odir.mkdir(exist_ok=True)
+
+    # add custom checkpoints
+    if checkpoint_callback is None:
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            filepath=args.output_dir, prefix="checkpoint", monitor="val_loss", mode="min", save_top_k=1
+        )
+    if logging_callback is None:
+        logging_callback = LoggingCallback()
+
+    train_params = {}
+
+    # TODO: remove with PyTorch 1.6 since pl uses native amp
+    if args.fp16:
+        train_params["precision"] = 16
+        train_params["amp_level"] = args.fp16_opt_level
+
+    if args.gpus > 1:
+        train_params["distributed_backend"] = "ddp"
+
+    train_params["accumulate_grad_batches"] = args.accumulate_grad_batches
+
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        weights_summary=None,
+        callbacks=[logging_callback] + extra_callbacks,
+        logger=logger,
+        checkpoint_callback=checkpoint_callback,
+        early_stop_callback=early_stopping_callback,
+        **train_params,
+    )
+
+    if args.do_train:
+        trainer.fit(model)
+
+    return trainer
 
 
 # %%
 if __name__ == "__main__":
-    # Two key aspects:
-
-    # - pytorch lightning can add arguments to the parser automatically
-
-    # - you can manually add your own specific arguments.
-
-    # - there is a little more code than seems necessary, because of a particular argument the scheduler
-    #   needs. There is currently an open issue on this complication
-    #   https://github.com/PyTorchLightning/pytorch-lightning/issues/1038
-
-    import argparse
-    from argparse import ArgumentParser
-
     parser = ArgumentParser()
-
-    # We use the parts of very convenient Auto functions from huggingface. This way we can easily switch
-    # between models and tokenizers, just by giving a different name of the pretrained model.
-    #
-    # BertForSequenceClassification is one of those pretrained models, which is loaded automatically by
-    # AutoModelForSequenceClassification because it corresponds to the pretrained weights of
-    # "bert-base-uncased".
-
-    # Similarly BertTokenizer is one of those tokenizers, which is loaded automatically by AutoTokenizer
-    # because it is the necessary tokenizer for the pretrained weights of "bert-base-uncased".
     parser.add_argument('--pretrained', type=str, default="bert-base-uncased")
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--learning_rate', type=float, default=2e-5)
@@ -246,26 +373,21 @@ if __name__ == "__main__":
     parser.add_argument('--num_labels', type=int, default=3)
     parser.add_argument('--nela_train', type=str, default='NELA/train_1.tsv')
     parser.add_argument('--nela_test', type=str, default='NELA/test_1.tsv')
+    parser.add_argument('--task', choices=['nela', 'constraint'])
 
     # parser = Model.add_model_specific_args(parser) parser = Data.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
-    # TODO start: remove this later
-    # args.limit_train_batches = 10 # TODO remove this later
-    # args.limit_val_batches = 5 # TODO remove this later
-    # args.frac = 0.01 # TODO remove this later
-    # TODO end: remove this later
-
     # start : get training steps
-    d = NELAData(args)
+    d = DATA_MODELS[args.task](args)
     d.prepare_data()
     d.setup()
     args.num_training_steps = len(d.train_dataloader()) * args.max_epochs
     # end : get training steps
 
     dict_args = vars(args)
-    m = Model(**dict_args)
+    m = TransformerModel(**dict_args)
 
     args.early_stop_callback = EarlyStopping('val_loss')
 
