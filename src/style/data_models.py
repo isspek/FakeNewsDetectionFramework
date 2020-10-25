@@ -34,8 +34,8 @@ class ConstraintData(pl.LightningDataModule):
         super().__init__()
         if isinstance(args, tuple): args = args[0]
         self.hparams = args
-        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.pretrained)
-        self.labels2id = {'fake': 0, 'true': 1}
+        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.model_name_or_path)
+        self.labels2id = {'fake': 0, 'real': 1}
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
     def setup(self, stage=None):
@@ -49,19 +49,19 @@ class ConstraintData(pl.LightningDataModule):
         # Get the lists of sentences and their labels.
         train_tweets = train_df.tweet.map(lambda x: clean_helper(x)).tolist()
         train_labels = train_df.label.tolist()
-
-        self.train_dataset = TensorDataset(self.encode_for_transformer(train_labels, train_tweets))
+        input_ids, attention_mask, labels = self.encode_for_transformer(tweets=train_tweets, labels=train_labels)
+        self.train_dataset = TensorDataset(input_ids, attention_mask, labels)
 
         val_tweets = val_df.tweet.map(lambda x: clean_helper(x)).tolist()
         val_labels = val_df.label.tolist()
-
-        self.val_dataset = TensorDataset(self.encode_for_transformer(val_tweets, val_labels))
+        input_ids, attention_mask, labels = self.encode_for_transformer(tweets=val_tweets, labels=val_labels)
+        self.val_dataset = TensorDataset(input_ids, attention_mask, labels)
 
     def encode_for_transformer(self, tweets, labels):
         encoded_tweets = self.tokenizer(
             tweets,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-            max_length=self.hparams.max_len,  # Pad & truncate all sentences.
+            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
             padding='max_length',
             truncation=True,
             return_attention_mask=True,  # Construct attn. masks.
@@ -78,15 +78,14 @@ class ConstraintData(pl.LightningDataModule):
             self.train_dataset,
             sampler=RandomSampler(
                 self.train_dataset),
-            batch_size=self.hparams.batch_size,
-            shuffle=True
+            batch_size=self.hparams.train_batch_size,
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
             sampler=SequentialSampler(self.val_dataset),
-            batch_size=self.hparams.batch_size,
+            batch_size=self.hparams.eval_batch_size,
             shuffle=False)
 
 
@@ -95,7 +94,7 @@ class NELAData(pl.LightningDataModule):
         super().__init__()
         if isinstance(args, tuple): args = args[0]
         self.hparams = args
-        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.pretrained)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.model_name_or_path)
         self.labels2id = {'reliable': 0, 'unreliable': 1, 'satire': 2}
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
@@ -117,7 +116,7 @@ class NELAData(pl.LightningDataModule):
         train_encoded_tweets = self.tokenizer(
             train_title, train_content,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-            max_length=self.hparams.max_len,  # Pad & truncate all sentences.
+            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
             padding='max_length',
             truncation=True,
             return_attention_mask=True,  # Construct attn. masks.
@@ -139,7 +138,7 @@ class NELAData(pl.LightningDataModule):
         val_encoded_tweets = self.tokenizer(
             val_title, val_content,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-            max_length=self.hparams.max_len,  # Pad & truncate all sentences.
+            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
             padding='max_length',
             truncation=True,
             return_attention_mask=True,  # Construct attn. masks.
@@ -154,7 +153,7 @@ class NELAData(pl.LightningDataModule):
             self.train_dataset,  # The training samples.
             sampler=RandomSampler(
                 self.train_dataset),  # Select batches randomly
-            batch_size=self.hparams.batch_size,  # Trains with this batch size.
+            batch_size=self.hparams.train_batch_size,  # Trains with this batch size.
             shuffle=True
         )
 
@@ -162,7 +161,7 @@ class NELAData(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,  # The training samples.
             sampler=SequentialSampler(self.val_dataset),  # Select batches randomly
-            batch_size=self.hparams.batch_size,  # Trains with this batch size.
+            batch_size=self.hparams.eval_batch_size,  # Trains with this batch size.
             shuffle=False)
 
 

@@ -1,12 +1,13 @@
 import torch
 import os
+import time
+import glob
 import numpy as np
 from transformers import AutoModelForSequenceClassification
 from transformers import AutoConfig
 from transformers import AdamW
 from transformers import get_linear_schedule_with_warmup
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping
 import argparse
 from argparse import ArgumentParser
 from .data_models import DATA_MODELS
@@ -16,13 +17,16 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from typing import Any, Dict
 from pytorch_lightning.utilities import rank_zero_info
 from transformers.data.metrics import simple_accuracy
+from torch.utils.data.dataloader import DataLoader
+import pandas as pd
+from torch.nn.functional import softmax
+
 
 # the following class is based on transformers/example (https://github.com/huggingface/transformers/blob/38f6739cd6c1725ecd75a40d5371483f738097c2/examples/lightning_base.py#L61)
 class TransformerModel(pl.LightningModule):
     def __init__(
             self,
             hparams: argparse.Namespace,
-            num_labels=None,
             config=None,
             model=None,
             **config_kwargs
@@ -40,7 +44,7 @@ class TransformerModel(pl.LightningModule):
         if config is None:
             self.config = AutoConfig.from_pretrained(
                 self.hparams.config_name if self.hparams.config_name else self.hparams.model_name_or_path,
-                **({"num_labels": num_labels} if num_labels is not None else {}),
+                **({"num_labels": self.hparams.num_labels} if self.hparams.num_labels is not None else {}),
                 cache_dir=cache_dir,
                 **config_kwargs,
             )
@@ -65,14 +69,9 @@ class TransformerModel(pl.LightningModule):
             self.model = model
 
     def training_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-
-        if self.config.model_type != "distilbert":
-            inputs["token_type_ids"] = batch[2] if self.config.model_type in ["bert", "xlnet", "albert"] else None
-
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
         outputs = self(**inputs)
         loss = outputs[0]
-
         lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
         tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
         return {"loss": loss, "log": tensorboard_logs}
@@ -115,10 +114,7 @@ class TransformerModel(pl.LightningModule):
         return self.model(**inputs)
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-
-        if self.config.model_type != "distilbert":
-            inputs["token_type_ids"] = batch[2] if self.config.model_type in ["bert", "xlnet", "albert"] else None
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -161,27 +157,23 @@ class TransformerModel(pl.LightningModule):
         """The number of total training steps that will be run. Used for lr scheduler purposes."""
         num_devices = max(1, self.hparams.gpus)  # TODO: consider num_tpu_cores
         effective_batch_size = self.hparams.train_batch_size * self.hparams.accumulate_grad_batches * num_devices
-        return (self.dataset_size / effective_batch_size) * self.hparams.max_epochs
-
-    def _feature_file(self, mode):
-        return os.path.join(
-            self.hparams.data_dir,
-            "cached_{}_{}_{}".format(
-                mode,
-                list(filter(None, self.hparams.model_name_or_path.split("/"))).pop(),
-                str(self.hparams.max_seq_length),
-            ),
-        )
+        return (self.hparams.dataset_size / effective_batch_size) * self.hparams.max_epochs
 
     @pl.utilities.rank_zero_only
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         save_path = self.output_dir.joinpath("best_tfmr")
         self.model.config.save_step = self.step_count
         self.model.save_pretrained(save_path)
-        self.tokenizer.save_pretrained(save_path)
 
     @staticmethod
     def add_model_specific_args(parser, root_dir):
+        parser.add_argument(
+            "--num_labels",
+            default=2,
+            type=int,
+            required=True,
+            help="Add number of class for the classification",
+        )
         parser.add_argument(
             "--model_name_or_path",
             default=None,
@@ -239,6 +231,7 @@ class TransformerModel(pl.LightningModule):
         parser.add_argument("--train_batch_size", default=32, type=int)
         parser.add_argument("--eval_batch_size", default=32, type=int)
         parser.add_argument("--adafactor", action="store_true")
+        return parser
 
 
 class LoggingCallback(pl.Callback):
@@ -269,7 +262,29 @@ class LoggingCallback(pl.Callback):
 
 def add_generic_args(parser, root_dir) -> None:
     #  To allow all pl args uncomment the following line
-    #  parser = pl.Trainer.add_argparse_args(parser)
+    parser.add_argument(
+        "--max_seq_length",
+        default=128,
+        type=int,
+        help="The maximum total input sequence length after tokenization. Sequences longer "
+             "than this will be truncated, sequences shorter will be padded.",
+    )
+    parser.add_argument(
+        "--task",
+        default="",
+        type=str,
+        required=True,
+        choices=['constraint', 'nela'],
+        help="Fakenews tasks",
+    )
+
+    parser.add_argument(
+        "--gpus",
+        default=0,
+        type=int,
+        help="The number of GPUs allocated for this, it is by default 0 meaning none",
+    )
+
     parser.add_argument(
         "--output_dir",
         default=None,
@@ -302,19 +317,15 @@ def add_generic_args(parser, root_dir) -> None:
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
-    parser.add_argument(
-        "--data_dir",
-        default=None,
-        type=str,
-        required=True,
-        help="The input data dir. Should contain the training files for the CoNLL-2003 NER task.",
-    )
+
+    parser.add_argument("--train_path", type=str, help="path for train set")
+    parser.add_argument("--val_path", type=str, help="path for dev set")
 
 
 def generic_train(
         model: TransformerModel,
+        data: DataLoader,
         args: argparse.Namespace,
-        early_stopping_callback=False,
         logger=True,  # can pass WandbLogger() here
         extra_callbacks=[],
         checkpoint_callback=None,
@@ -353,12 +364,11 @@ def generic_train(
         callbacks=[logging_callback] + extra_callbacks,
         logger=logger,
         checkpoint_callback=checkpoint_callback,
-        early_stop_callback=early_stopping_callback,
         **train_params,
     )
 
     if args.do_train:
-        trainer.fit(model)
+        trainer.fit(model, data)
 
     return trainer
 
@@ -366,34 +376,64 @@ def generic_train(
 # %%
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument('--pretrained', type=str, default="bert-base-uncased")
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--learning_rate', type=float, default=2e-5)
-    parser.add_argument('--max_len', type=int, default=128)
-    parser.add_argument('--num_labels', type=int, default=3)
-    parser.add_argument('--nela_train', type=str, default='NELA/train_1.tsv')
-    parser.add_argument('--nela_test', type=str, default='NELA/test_1.tsv')
-    parser.add_argument('--task', choices=['nela', 'constraint'])
-
-    # parser = Model.add_model_specific_args(parser) parser = Data.add_model_specific_args(parser)
-    parser = pl.Trainer.add_argparse_args(parser)
+    add_generic_args(parser, os.getcwd())
+    parser = TransformerModel.add_model_specific_args(parser, os.getcwd())
     args = parser.parse_args()
 
+    # If output_dir not provided, a folder will be generated in pwd
+    if args.output_dir is None:
+        args.output_dir = os.path.join(
+            "./results",
+            f"{args.task}_{time.strftime('%Y%m%d_%H%M%S')}",
+        )
+        os.makedirs(args.output_dir)
+
     # start : get training steps
-    d = DATA_MODELS[args.task](args)
-    d.prepare_data()
-    d.setup()
-    args.num_training_steps = len(d.train_dataloader()) * args.max_epochs
-    # end : get training steps
+    data = DATA_MODELS[args.task](args)
+    data.prepare_data()
+    data.setup()
+    args.dataset_size = len(data.train_dataloader())
 
-    dict_args = vars(args)
-    m = TransformerModel(**dict_args)
+    model = TransformerModel(args)
 
-    args.early_stop_callback = EarlyStopping('val_loss')
-
-    trainer = pl.Trainer.from_argparse_args(args)
-
-    # fit the data
-    trainer.fit(m, d)
-
+    # train model
+    trainer = generic_train(model, data, args)
+    # Optionally, predict on dev set and write to output_dir
+    if args.do_predict:
+        checkpoints = list(sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-epoch=*.ckpt"), recursive=True)))
+        model = model.load_from_checkpoint(checkpoints[-1])
+        results = trainer.test(model, test_dataloaders=data.val_dataloader())
+        print(results)
     # %%
+
+    # inference
+    preds = []
+    input_ids = []
+    masks = []
+    labels = []
+    probs = []
+
+    device = torch.device('cuda')
+    model.to(device)
+    model.eval()
+    for ix, batch in enumerate(data.val_dataloader()):
+        inputs = {"input_ids": batch[0].to(device), "attention_mask": batch[1].to(device),
+                  "labels": batch[2].to(device)}
+
+        # forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+            tmp_eval_loss, logits = outputs[:2]
+            prob = softmax(logits, dim=1)
+            top_p, _ = prob.topk(1, dim=1)
+            probs.append(top_p.cpu().numpy().item())
+            preds.append(int(torch.argmax(logits).cpu().numpy().item()))
+        labels.append(inputs["labels"].cpu().numpy().item())
+    preds = [data.id2labels[pred] for pred in preds]
+    labels = [data.id2labels[label] for label in labels]
+    validation = pd.DataFrame({
+        'predictions': preds,
+        'probs': probs,
+        'labels': labels
+    })
+    validation.to_csv(os.path.join(args.output_dir, 'val_results.csv'))
