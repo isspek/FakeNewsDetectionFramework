@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 import pytorch_lightning as pl
 from src.logger import logger
 from cleantext import clean
+import csv
 
 
 def clean_helper(text):
@@ -39,8 +40,8 @@ class ConstraintData(pl.LightningDataModule):
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
     def setup(self, stage=None):
-        train_df = pd.read_csv(self.hparams.train_path, delimiter='\t')
-        val_df = pd.read_csv(self.hparams.val_path, delimiter='\t')
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
 
         # Stats of dataset
         logger.info(f'Total samples in training: {len(train_df)}')
@@ -99,8 +100,8 @@ class NELAData(pl.LightningDataModule):
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
     def setup(self, stage=None):
-        train_df = pd.read_csv(self.hparams.nela_train, delimiter='\t')
-        val_df = pd.read_csv(self.hparams.nela_test, delimiter='\t')
+        train_df = pd.read_csv(self.hparams.nela_train, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.nela_test, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
 
         # Stats of dataset
         logger.info(f'Total samples in training: {len(train_df)}')
