@@ -100,8 +100,8 @@ class NELAData(pl.LightningDataModule):
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
     def setup(self, stage=None):
-        train_df = pd.read_csv(self.hparams.nela_train, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
-        val_df = pd.read_csv(self.hparams.nela_test, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        train_df = pd.read_csv(self.hparams.train_path, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, error_bad_lines=False, delimiter='\t')
 
         # Stats of dataset
         logger.info(f'Total samples in training: {len(train_df)}')
@@ -111,42 +111,15 @@ class NELAData(pl.LightningDataModule):
         train_title = train_df.title.map(lambda x: clean_helper(x)).tolist()
         train_content = train_df.content.map(lambda x: clean_helper(x)).tolist()
         train_labels = train_df.label.tolist()
-        train_labels = torch.tensor([self.labels2id[i] for i in train_labels])
-
-        # tokenize the sentences with Transformer tokens
-        train_encoded_tweets = self.tokenizer(
-            train_title, train_content,  # Sentence to encode.
-            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,  # Construct attn. masks.
-            return_tensors='pt'  # Return pytorch tensors.
-        )
-
-        # Convert the lists into tensors.
-        train_input_ids = train_encoded_tweets['input_ids']
-        train_attention_mask = train_encoded_tweets['attention_mask']
-
-        # Combine the training inputs into a TensorDataset.
-        self.train_dataset = TensorDataset(train_input_ids, train_attention_mask, train_labels)
+        input_ids, attention_mask, labels = self.encode_for_transformer(titles=train_title, contents=train_content,
+                                                                        labels=train_labels)
+        self.train_dataset = TensorDataset(input_ids, attention_mask, labels)
         val_title = val_df.title.map(lambda x: clean_helper(x)).tolist()
         val_content = val_df.content.map(lambda x: clean_helper(x)).tolist()
         val_labels = val_df.label.tolist()
-        val_labels = torch.tensor([self.labels2id[i] for i in val_labels])
-
-        # tokenize the sentences with Transformer tokens
-        val_encoded_tweets = self.tokenizer(
-            val_title, val_content,  # Sentence to encode.
-            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
-            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,  # Construct attn. masks.
-            return_tensors='pt'  # Return pytorch tensors.
-        )
-        val_input_ids = val_encoded_tweets['input_ids']
-        val_attention_mask = val_encoded_tweets['attention_mask']
+        val_input_ids, val_attention_mask, val_labels = self.encode_for_transformer(titles=val_title,
+                                                                                    contents=val_content,
+                                                                                    labels=val_labels)
         self.val_dataset = TensorDataset(val_input_ids, val_attention_mask, val_labels)
 
     def train_dataloader(self):
@@ -155,7 +128,6 @@ class NELAData(pl.LightningDataModule):
             sampler=RandomSampler(
                 self.train_dataset),  # Select batches randomly
             batch_size=self.hparams.train_batch_size,  # Trains with this batch size.
-            shuffle=True
         )
 
     def val_dataloader(self):
@@ -164,6 +136,23 @@ class NELAData(pl.LightningDataModule):
             sampler=SequentialSampler(self.val_dataset),  # Select batches randomly
             batch_size=self.hparams.eval_batch_size,  # Trains with this batch size.
             shuffle=False)
+
+    def encode_for_transformer(self, titles, contents, labels):
+        encoded_tweets = self.tokenizer(
+            titles,
+            contents,  # Sentence to encode.
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors='pt'  # Return pytorch tensors.
+        )
+        input_ids = encoded_tweets['input_ids']
+        attention_mask = encoded_tweets['attention_mask']
+        labels = torch.tensor([self.labels2id[i] for i in labels])
+
+        return input_ids, attention_mask, labels
 
 
 DATA_MODELS = {
