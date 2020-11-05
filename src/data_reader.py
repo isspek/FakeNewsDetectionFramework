@@ -4,6 +4,8 @@ from pathlib import Path
 from .logger import logger
 import sqlite3
 import random
+import csv
+import json
 
 DATA_DIR = Path('data')
 FOLD = 5
@@ -16,8 +18,8 @@ RESAMPLE_LIMIT = 100
 def read_constraint_splits():
     train_fpath = DATA_DIR / 'train.tsv'
     val_fpath = DATA_DIR / 'val.tsv'
-    train = pd.read_csv(train_fpath, sep='\t')
-    val = pd.read_csv(val_fpath, sep='\t')
+    train = pd.read_csv(train_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    val = pd.read_csv(val_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
     return {
         'train': train,
         'val': val
@@ -138,7 +140,7 @@ def process_nela(nela_2018_path: str, nela_2019_path: str):
 
 def resample_sources(sources):
     sources = sources.groupby('source').filter(lambda x: x['title'].count() > 9)
-    sources.reset_index(drop=True, inplace=True)  # reset index
+    sources.reset_index(drop=True, inplace=True)  # reset elasticsearch
     sources = sources.groupby('source').apply(
         lambda x: x.sample(n=RESAMPLE_LIMIT) if len(x) > RESAMPLE_LIMIT else x).reset_index(drop=True)
     return sources
@@ -156,14 +158,81 @@ def split_by_source(data, sources):
     return test, train
 
 
+def process_fakehealth(dataset_path: str):
+    def extract_content(dir, news_source, news_ids, label):
+        processed_data = []
+        for news_id in news_ids:
+            data = {}
+            fname = f"content/{news_source}/{news_id}.json"
+            if not (dir / fname).exists():
+                logger.error(f"{news_id} does not exist")
+                continue
+            with open(dir / fname) as f:
+                news_item = json.load(f)
+                data["content"] = news_item["text"]
+                data["url"] = news_item["url"]
+                data["title"] = news_item["title"]
+                data["news_id"] = news_id
+                data["label"] = label
+                processed_data.append(data)
+        logger.info(f"Num of processed {label} news with date {len(processed_data)}")
+        return processed_data
+
+    dir = Path(dataset_path)
+    reviews = pd.read_json(dir / 'reviews/HealthStory.json')
+    score = 3
+    fake_stories = reviews[reviews["rating"] < score]
+    true_stories = reviews[reviews["rating"] >= score]
+
+    logger.info("Stats of Health Story")
+    logger.info(f"Num of fake stories {len(fake_stories)}")
+    logger.info(f"Num of true stories {len(true_stories)}")
+    logger.info(f"Num of unique sources in fake stories {len(fake_stories.news_source.unique())}")
+    logger.info(f"Num of unique sources in true stories {len(true_stories.news_source.unique())}")
+    logger.info(
+        f"Num of overlapped sources {len(set(fake_stories.news_source.unique()) - set(true_stories.news_source.unique()))}")
+
+    filtered_fake_stories = pd.DataFrame(extract_content(dir, "HealthStory", fake_stories.news_id.values, "fake"))
+    filtered_true_stories = pd.DataFrame(extract_content(dir, "HealthStory", true_stories.news_id.values, "true"))
+
+    releases = pd.read_json(dir / 'reviews/HealthRelease.json')
+    fake_releases = releases[releases["rating"] < score]
+    true_releases = releases[releases["rating"] >= score]
+
+    logger.info("Stats of Health Releases")
+    logger.info(f"Num of fake releases {len(fake_stories)}")
+    logger.info(f"Num of true releases {len(true_stories)}")
+    logger.info(f"Num of unique sources in fake releases {len(fake_releases.news_source.unique())}")
+    logger.info(f"Num of unique sources in true releases {len(true_releases.news_source.unique())}")
+    logger.info(
+        f"Num of overlapped sources {len(set(fake_stories.news_source.unique()) - set(true_stories.news_source.unique()))}")
+
+    filtered_fake_releases = pd.DataFrame(extract_content(dir, "HealthRelease", fake_releases.news_id.values, "fake"))
+    filtered_true_releases = pd.DataFrame(extract_content(dir, "HealthRelease", true_releases.news_id.values, "true"))
+    merged_data = pd.concat(
+        [filtered_fake_releases, filtered_true_stories, filtered_fake_stories, filtered_true_releases])
+
+    output_dir = 'data/processed'
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    processed_dir = Path(output_dir)
+    processed_file = processed_dir / 'FakeHealth.tsv'
+    merged_data.to_csv(processed_file, sep='\t', index=False)
+    logger.info(f"Merged data is saved to {processed_file}")
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
 
     # NELA settings
     parser.add_argument('--nela_2018', type=str)
     parser.add_argument('--nela_2019', type=str)
+    parser.add_argument('--fakehealth', type=str)
 
     args = parser.parse_args()
 
     if args.nela_2018 and args.nela_2019:
         process_nela(args.nela_2018, args.nela_2019)
+
+    if args.fakehealth:
+        logger.info('Processing Fakehealth datasets...')
+        process_fakehealth(args.fakehealth)
