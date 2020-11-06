@@ -90,6 +90,10 @@ class ConstraintData(pl.LightningDataModule):
             shuffle=False)
 
 
+class HistoryConstraintData(pl.LightningDataModule):
+    pass
+
+
 class NELAData(pl.LightningDataModule):
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -157,5 +161,6 @@ class NELAData(pl.LightningDataModule):
 
 DATA_MODELS = {
     'constraint': ConstraintData,
-    'nela': NELAData
+    'nela': NELAData,
+    'historyconstraint': HistoryConstraintData
 }
