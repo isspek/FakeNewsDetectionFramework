@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
 
-MODEL_NAME = 'allenai/scibert_scivocab_uncased'
+MODEL_NAME = 'bert-base-nli-mean-tokens'
 MODEL = SentenceTransformer(MODEL_NAME)
 
 

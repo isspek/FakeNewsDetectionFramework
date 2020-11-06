@@ -1,5 +1,4 @@
-# docker pull docker.elastic.co/elasticsearch/elasticsearch:7.6.1
-# docker run -p 9200:9200 -p 9300:9300 -e "discovery.type=single-node" docker.elastic.co/elasticsearch/elasticsearch:7.6.1
-python -m src.elasticsearch.baseline --vclaims data/processed/FakeHealth.tsv --tweets data/val.tsv --predict-file 'data/predictions.tsv' --index_file_path data/baseline.json
-# python -m src.index.create_index --index_file=data/index.json --index_name=fakenews
-# python -m src.index.create_documents.py --data=data/processed/FakeHealth.tsv --index_name=fakenews
+docker pull docker.elastic.co/elasticsearch/elasticsearch:7.6.1
+docker run -p 9200:9200 -p 9300:9300 -e "discovery.type=single-node" docker.elastic.co/elasticsearch/elasticsearch:7.6.1
+python -m src.elasticsearch.search --tweets data/val.tsv --index_file_path data/semantic.json --option semantic
+python -m src.elasticsearch.search --tweets data/val.tsv --index_file_path data/semantic.json --option default

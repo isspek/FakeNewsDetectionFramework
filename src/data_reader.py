@@ -6,6 +6,7 @@ import sqlite3
 import random
 import csv
 import json
+from tqdm import tqdm
 
 DATA_DIR = Path('data')
 FOLD = 5
@@ -220,6 +221,37 @@ def process_fakehealth(dataset_path: str):
     logger.info(f"Merged data is saved to {processed_file}")
 
 
+def process_healthreview(dataset_path: str):
+    data = pd.read_csv(dataset_path)
+    data = data[
+        (data['temp_label'] == 'false') | (
+                data['temp_label'] == 'mostly_false')]  # select only false claims for indexing
+    latest_date = max(data['claimReview_datePublished'].tolist())
+    earliest_date = min(data['claimReview_datePublished'].tolist())
+    logger.info(f'Latest review id {latest_date}')
+    logger.info(f'Earliest review id {earliest_date}')
+    processed_data = []
+    for i, row in tqdm(data.iterrows(), total=len(data)):
+        if not 'health' in row.claimReview_url or not 'health' in row.claimReview_claimReviewed:
+            continue
+        sample = {}
+        sample['content'] = row.loc['claimReview_claimReviewed']
+        sample['title'] = row.loc['extra_title']
+        sample['label'] = row.loc['temp_label']
+        sample['news_id'] = ''
+        sample['url'] = ''
+        processed_data.append(sample)
+
+    processed_data = pd.DataFrame(processed_data)
+    logger.info(f'Num of samples in processed data {len(processed_data)}')
+    output_dir = 'data/processed'
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    processed_dir = Path(output_dir)
+    processed_file = processed_dir / 'HealthReview.tsv'
+    processed_data.to_csv(processed_file, sep='\t', index=False)
+    logger.info(f"Merged data is saved to {processed_file}")
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
 
@@ -227,6 +259,7 @@ if __name__ == '__main__':
     parser.add_argument('--nela_2018', type=str)
     parser.add_argument('--nela_2019', type=str)
     parser.add_argument('--fakehealth', type=str)
+    parser.add_argument('--healthreview', type=str)
 
     args = parser.parse_args()
 
@@ -236,3 +269,7 @@ if __name__ == '__main__':
     if args.fakehealth:
         logger.info('Processing Fakehealth datasets...')
         process_fakehealth(args.fakehealth)
+
+    if args.healthreview:
+        logger.info('Processing Healthreview dataset...')
+        process_healthreview(args.healthreview)
