@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from src.logger import logger
 from cleantext import clean
 import csv
+from tqdm import tqdm
 
 
 def clean_helper(text):
@@ -90,8 +91,103 @@ class ConstraintData(pl.LightningDataModule):
             shuffle=False)
 
 
+NUM_OF_PAST_CLAIMS = 10
+
+
 class HistoryConstraintData(pl.LightningDataModule):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        if isinstance(args, tuple): args = args[0]
+        self.hparams = args
+        self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.model_name_or_path)
+        self.labels2id = {'fake': 0, 'real': 1}
+        self.id2labels = {val: key for key, val in self.labels2id.items()}
+
+    def setup(self, stage=None):
+        # tweets
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+
+        # search results
+        train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
+        val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
+
+        # Stats of dataset
+        logger.info(f'Total samples in training: {len(train_df)}')
+        logger.info(f'Total samples in validation: {len(val_df)}')
+
+        data = []
+        for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
+            tweet = row.tweet
+            similar_false_claims = train_history_df[train_history_df['tweet_id'] == i]
+            similar_false_claims = similar_false_claims.fillna('')
+            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
+            cleaned_tweet = clean_helper(tweet)
+            claims = []
+            for claim in similar_false_claims:
+                cleaned_claim = clean_helper(claim)
+                input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet, cleaned_claim)
+                claims.append(torch.stack((input_ids, attention_mask)))
+            if len(claims) < NUM_OF_PAST_CLAIMS:
+                for _ in range(NUM_OF_PAST_CLAIMS - len(claims)):
+                    input_ids, attention_mask = self.encode_for_transformer('', cleaned_tweet)
+                    claims.append(torch.stack((input_ids, attention_mask)))
+            data.append(torch.stack(claims))
+        data = torch.stack(data)
+        train_labels = train_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in train_labels])
+
+        # num of samples, num of evidences, [input ids, attention mask], additional dim, length
+        self.train_dataset = TensorDataset(data, labels)
+
+        data = []
+        for i, row in tqdm(val_df.iterrows(), total=len(val_df)):
+            tweet = row.tweet
+            similar_false_claims = val_history_df[val_history_df['tweet_id'] == i]
+            similar_false_claims = similar_false_claims.fillna('')
+            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
+            claims = []
+            for claim in similar_false_claims:
+                cleaned_tweet = clean_helper(tweet)
+                cleaned_claim = clean_helper(claim)
+                input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet, cleaned_claim)
+                claims.append(torch.stack((input_ids, attention_mask)))
+            data.append(torch.stack(claims))
+        data = torch.stack(data)
+        val_labels = val_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in val_labels])
+
+        self.val_dataset = TensorDataset(data, labels)
+
+    def encode_for_transformer(self, tweets, claims):
+        encoded_tweets = self.tokenizer(
+            tweets,  # Sentence to encode.
+            claims,
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=self.hparams.max_seq_length,  # Pad & truncate all sentences.
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors='pt'  # Return pytorch tensors.
+        )
+        input_ids = encoded_tweets['input_ids']
+        attention_mask = encoded_tweets['attention_mask']
+        return input_ids, attention_mask
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            sampler=RandomSampler(
+                self.train_dataset),
+            batch_size=self.hparams.train_batch_size,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            sampler=SequentialSampler(self.val_dataset),
+            batch_size=self.hparams.eval_batch_size,
+            shuffle=False)
 
 
 class NELAData(pl.LightningDataModule):
@@ -162,5 +258,5 @@ class NELAData(pl.LightningDataModule):
 DATA_MODELS = {
     'constraint': ConstraintData,
     'nela': NELAData,
-    'historyconstraint': HistoryConstraintData
+    'history_constraint': HistoryConstraintData
 }

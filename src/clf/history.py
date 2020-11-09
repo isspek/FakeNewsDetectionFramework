@@ -3,10 +3,11 @@ import os
 import time
 import glob
 import numpy as np
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoModel
 from transformers import AutoConfig
 from transformers import AdamW
 from transformers import get_linear_schedule_with_warmup
+from torch.nn import CrossEntropyLoss, MSELoss
 import pytorch_lightning as pl
 import argparse
 from argparse import ArgumentParser
@@ -20,10 +21,10 @@ from transformers.data.metrics import simple_accuracy
 from torch.utils.data.dataloader import DataLoader
 import pandas as pd
 from torch.nn.functional import softmax
+import torch.nn as nn
 
 
-# the following class is based on transformers/example (https://github.com/huggingface/transformers/blob/38f6739cd6c1725ecd75a40d5371483f738097c2/examples/lightning_base.py#L61)
-class TransformerModel(pl.LightningModule):
+class History(pl.LightningModule):
     def __init__(
             self,
             hparams: argparse.Namespace,
@@ -57,19 +58,24 @@ class TransformerModel(pl.LightningModule):
                 assert hasattr(self.config, p), f"model config doesn't have a `{p}` attribute"
                 setattr(self.config, p, getattr(self.hparams, p))
 
-        self.model_type = AutoModelForSequenceClassification
+        self.model_type = AutoModel
         if model is None:
-            self.model = self.model_type.from_pretrained(
+            self.transformer_model = self.model_type.from_pretrained(
                 self.hparams.model_name_or_path,
                 from_tf=bool(".ckpt" in self.hparams.model_name_or_path),
                 config=self.config,
                 cache_dir=cache_dir,
             )
         else:
-            self.model = model
+            self.transformer_model = model
+
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.classifier = nn.Linear(self.config.hidden_size * 10, self.num_labels)
 
     def training_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
+        inputs = {"past_claims": batch[0], "labels": batch[1]}
+
         outputs = self(**inputs)
         loss = outputs[0]
         lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
@@ -77,7 +83,7 @@ class TransformerModel(pl.LightningModule):
         return {"loss": loss, "log": tensorboard_logs}
 
     def load_hf_checkpoint(self, *args, **kwargs):
-        self.model = self.model_type.from_pretrained(*args, **kwargs)
+        self.transformer_model = self.model_type.from_pretrained(*args, **kwargs)
 
     def get_lr_scheduler(self):
         scheduler = get_linear_schedule_with_warmup(
@@ -88,7 +94,7 @@ class TransformerModel(pl.LightningModule):
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
-        model = self.model
+        model = self.transformer_model
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
@@ -111,10 +117,32 @@ class TransformerModel(pl.LightningModule):
         return [optimizer], [scheduler]
 
     def forward(self, **inputs):
-        return self.model(**inputs)
+        past_claims = inputs['past_claims']
+        labels = inputs['labels']
+        past_claims_len = past_claims.shape[1]
+        concat_embeddings = []
+        for i in range(past_claims_len):
+            input_ids = past_claims[:, i, 0, :, :]
+            attention_masks = past_claims[:, i, 1, :, :]
+            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
+            pooled_output = self.dropout(pooled_output)
+            concat_embeddings.append(pooled_output)
+        concat_embeddings = torch.cat(concat_embeddings, dim=1)
+        logits = self.classifier(concat_embeddings)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
+        inputs = {"past_claims": batch[0], "labels": batch[1]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -162,8 +190,8 @@ class TransformerModel(pl.LightningModule):
     @pl.utilities.rank_zero_only
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         save_path = self.output_dir.joinpath("best_tfmr")
-        self.model.config.save_step = self.step_count
-        self.model.save_pretrained(save_path)
+        self.transformer_model.config.save_step = self.step_count
+        self.transformer_model.save_pretrained(save_path)
 
     @staticmethod
     def add_model_specific_args(parser, root_dir):
@@ -323,8 +351,9 @@ def add_generic_args(parser, root_dir) -> None:
     parser.add_argument("--history_train_path", type=str, help="path for search results of train set")
     parser.add_argument("--history_val_path", type=str, help="path for search results of val set")
 
+
 def generic_train(
-        model: TransformerModel,
+        model: History,
         data: DataLoader,
         args: argparse.Namespace,
         logger=True,  # can pass WandbLogger() here
@@ -374,11 +403,29 @@ def generic_train(
     return trainer
 
 
+# reference https://github.com/ricardorei/lightning-text-classification
+def mask_fill(
+        fill_value: float,
+        tokens: torch.tensor,
+        embeddings: torch.tensor,
+        padding_index: int,
+) -> torch.tensor:
+    """
+    Function that masks embeddings representing padded elements.
+    :param fill_value: the value to fill the embeddings belonging to padded tokens.
+    :param tokens: The input sequences [bsz x seq_len].
+    :param embeddings: word embeddings [bsz x seq_len x hiddens].
+    :param padding_index: Index of the padding token.
+    """
+    padding_mask = tokens.eq(padding_index).unsqueeze(-1)
+    return embeddings.float().masked_fill_(padding_mask, fill_value).type_as(embeddings)
+
+
 # %%
 if __name__ == "__main__":
     parser = ArgumentParser()
     add_generic_args(parser, os.getcwd())
-    parser = TransformerModel.add_model_specific_args(parser, os.getcwd())
+    parser = History.add_model_specific_args(parser, os.getcwd())
     args = parser.parse_args()
 
     # If output_dir not provided, a folder will be generated in pwd
@@ -395,7 +442,7 @@ if __name__ == "__main__":
     data.setup()
     args.dataset_size = len(data.train_dataloader())
 
-    model = TransformerModel(args)
+    model = History(args)
 
     # train model
     trainer = generic_train(model, data, args)
@@ -418,8 +465,7 @@ if __name__ == "__main__":
     model.to(device)
     model.eval()
     for ix, batch in enumerate(data.val_dataloader()):
-        inputs = {"input_ids": batch[0].to(device), "attention_mask": batch[1].to(device),
-                  "labels": batch[2].to(device)}
+        inputs = {"past_claims": batch[0].to(device), "labels": batch[1].to(device)}
 
         # forward pass
         with torch.no_grad():
