@@ -262,6 +262,213 @@ class History(pl.LightningModule):
         return parser
 
 
+class HistoryStyle(History):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
+        super().__init__(hparams, config=None, model=None, **config_kwargs)
+        self.classifier = nn.Linear(self.config.hidden_size * 11, self.num_labels)
+
+    def training_step(self, batch, batch_idx):
+        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
+
+        outputs = self(**inputs)
+        loss = outputs[0]
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
+
+    def load_hf_checkpoint(self, *args, **kwargs):
+        self.transformer_model = self.model_type.from_pretrained(*args, **kwargs)
+
+    def get_lr_scheduler(self):
+        scheduler = get_linear_schedule_with_warmup(
+            self.opt, num_warmup_steps=self.hparams.warmup_steps, num_training_steps=self.total_steps()
+        )
+        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
+        return scheduler
+
+    def configure_optimizers(self):
+        """Prepare optimizer and schedule (linear warmup and decay)"""
+        model = self.transformer_model
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": self.hparams.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+
+        optimizer = AdamW(
+            optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
+        )
+        self.opt = optimizer
+
+        scheduler = self.get_lr_scheduler()
+
+        return [optimizer], [scheduler]
+
+    def forward(self, **inputs):
+        past_claims = inputs['past_claims']
+
+        labels = inputs['labels']
+        past_claims_len = past_claims.shape[1]
+        concat_embeddings = []
+        post = inputs['post']
+        pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
+                                               attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
+        pooled_output = self.dropout(pooled_output)
+        concat_embeddings.append(pooled_output)
+        for i in range(past_claims_len):
+            input_ids = past_claims[:, i, 0, :, :]
+            attention_masks = past_claims[:, i, 1, :, :]
+            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
+            pooled_output = self.dropout(pooled_output)
+            concat_embeddings.append(pooled_output)
+        concat_embeddings = torch.cat(concat_embeddings, dim=1)
+        logits = self.classifier(concat_embeddings)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits
+
+    def validation_step(self, batch, batch_idx):
+        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
+
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def _eval_end(self, outputs) -> tuple:
+        val_loss_mean = torch.stack([x["val_loss"] for x in outputs]).mean().detach().cpu().item()
+        preds = np.concatenate([x["pred"] for x in outputs], axis=0)
+
+        preds = np.argmax(preds, axis=1)
+
+        out_label_ids = np.concatenate([x["target"] for x in outputs], axis=0)
+        out_label_list = [[] for _ in range(out_label_ids.shape[0])]
+        preds_list = [[] for _ in range(out_label_ids.shape[0])]
+
+        results = {**{"val_loss": val_loss_mean}, **{"acc": simple_accuracy(preds, out_label_ids)}}
+
+        ret = {k: v for k, v in results.items()}
+        ret["log"] = results
+        return ret, preds_list, out_label_list
+
+    def validation_epoch_end(self, outputs: list) -> dict:
+        ret, preds, targets = self._eval_end(outputs)
+        logs = ret["log"]
+        return {"val_loss": logs["val_loss"], "log": logs, "progress_bar": logs}
+
+    def test_epoch_end(self, outputs) -> dict:
+        ret, predictions, targets = self._eval_end(outputs)
+        logs = ret["log"]
+        # `val_loss` is the key returned by `self._eval_end()` but actually refers to `test_loss`
+        return {"avg_test_loss": logs["val_loss"], "log": logs, "progress_bar": logs}
+
+    def test_step(self, batch, batch_nb):
+        return self.validation_step(batch, batch_nb)
+
+    def total_steps(self) -> int:
+        """The number of total training steps that will be run. Used for lr scheduler purposes."""
+        num_devices = max(1, self.hparams.gpus)  # TODO: consider num_tpu_cores
+        effective_batch_size = self.hparams.train_batch_size * self.hparams.accumulate_grad_batches * num_devices
+        return (self.hparams.dataset_size / effective_batch_size) * self.hparams.max_epochs
+
+    @pl.utilities.rank_zero_only
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        save_path = self.output_dir.joinpath("best_tfmr")
+        self.transformer_model.config.save_step = self.step_count
+        self.transformer_model.save_pretrained(save_path)
+
+    @staticmethod
+    def add_model_specific_args(parser, root_dir):
+        parser.add_argument(
+            "--num_labels",
+            default=2,
+            type=int,
+            required=True,
+            help="Add number of class for the classification",
+        )
+        parser.add_argument(
+            "--model_name_or_path",
+            default=None,
+            type=str,
+            required=True,
+            help="Path to pretrained model or model identifier from huggingface.co/models",
+        )
+        parser.add_argument(
+            "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
+        )
+        parser.add_argument(
+            "--tokenizer_name",
+            default=None,
+            type=str,
+            help="Pretrained tokenizer name or path if not the same as model_name",
+        )
+        parser.add_argument(
+            "--cache_dir",
+            default="",
+            type=str,
+            help="Where do you want to store the pre-trained models downloaded from s3",
+        )
+        parser.add_argument(
+            "--encoder_layerdrop",
+            type=float,
+            help="Encoder layer dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--decoder_layerdrop",
+            type=float,
+            help="Decoder layer dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--dropout",
+            type=float,
+            help="Dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument(
+            "--attention_dropout",
+            type=float,
+            help="Attention dropout probability (Optional). Goes into model.config",
+        )
+        parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
+        parser.add_argument(
+            "--lr_scheduler",
+            default="linear",
+            type=str,
+            help="Learning rate scheduler",
+        )
+        parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
+        parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+        parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
+        parser.add_argument("--num_workers", default=4, type=int, help="kwarg passed to DataLoader")
+        parser.add_argument("--num_train_epochs", dest="max_epochs", default=3, type=int)
+        parser.add_argument("--train_batch_size", default=32, type=int)
+        parser.add_argument("--eval_batch_size", default=32, type=int)
+        parser.add_argument("--adafactor", action="store_true")
+        return parser
+
+
 class LoggingCallback(pl.Callback):
     def on_batch_end(self, trainer, pl_module):
         lr_scheduler = trainer.lr_schedulers[0]["scheduler"]
@@ -302,7 +509,7 @@ def add_generic_args(parser, root_dir) -> None:
         default="",
         type=str,
         required=True,
-        choices=['constraint', 'nela', 'history_constraint'],
+        choices=['constraint', 'nela', 'history_constraint', 'history_style'],
         help="Fakenews tasks",
     )
 
@@ -425,7 +632,9 @@ def mask_fill(
 if __name__ == "__main__":
     parser = ArgumentParser()
     add_generic_args(parser, os.getcwd())
-    parser = History.add_model_specific_args(parser, os.getcwd())
+
+    'TODO hparams'
+    parser = HistoryStyle.add_model_specific_args(parser, os.getcwd())
     args = parser.parse_args()
 
     # If output_dir not provided, a folder will be generated in pwd
@@ -442,7 +651,10 @@ if __name__ == "__main__":
     data.setup()
     args.dataset_size = len(data.train_dataloader())
 
-    model = History(args)
+    if args.task == 'history_constraint':
+        model = History(args)
+    elif args.task == 'history_style':
+        model = HistoryStyle(args)
 
     # train model
     trainer = generic_train(model, data, args)
@@ -465,8 +677,10 @@ if __name__ == "__main__":
     model.to(device)
     model.eval()
     for ix, batch in enumerate(data.val_dataloader()):
-        inputs = {"past_claims": batch[0].to(device), "labels": batch[1].to(device)}
-
+        if args.task == 'history_constraint':
+            inputs = {"past_claims": batch[0].to(device), "labels": batch[1].to(device)}
+        elif args.task == 'history_style_constraint':
+            inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device), "labels": batch[1].to(device)}
         # forward pass
         with torch.no_grad():
             outputs = model(**inputs)
