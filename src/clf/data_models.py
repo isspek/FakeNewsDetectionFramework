@@ -208,8 +208,8 @@ class HistoryStyleConstraint(HistoryConstraintData):
 
     def setup(self, stage=None):
         # tweets
-        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')[:10]
-        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')[:2]
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
 
         # search results
         train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
