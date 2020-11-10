@@ -103,7 +103,7 @@
 # --do_train \
 
 python -m src.clf.history --num_labels 2 --model_name_or_path bert-base-uncased --output_dir results_history_style \
---train_batch_size 8 \
+--train_batch_size 1 \
 --eval_batch_size 1 \
 --learning_rate 2e-5 \
 --num_labels 2 \
