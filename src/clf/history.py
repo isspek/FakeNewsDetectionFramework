@@ -292,16 +292,17 @@ class HistoryStyle(History):
         post = inputs['post']
         pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
                                                attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
-        pooled_output = self.dropout(pooled_output)
+        # pooled_output = self.dropout(pooled_output)
         concat_embeddings.append(pooled_output)
         for i in range(past_claims_len):
             input_ids = past_claims[:, i, 0, :, :]
             attention_masks = past_claims[:, i, 1, :, :]
             pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
                                                    attention_mask=attention_masks.squeeze(dim=1))[1]
-            pooled_output = self.dropout(pooled_output)
+            # pooled_output = self.dropout(pooled_output)
             concat_embeddings.append(pooled_output)
         concat_embeddings = torch.cat(concat_embeddings, dim=1)
+        concat_embeddings=self.dropout(concat_embeddings)
         logits = self.classifier(concat_embeddings)
         loss = None
         if labels is not None:
