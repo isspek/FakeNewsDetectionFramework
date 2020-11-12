@@ -34,6 +34,25 @@ def normalize_source(source: str):
     return source
 
 
+def read_nela_assessments(nela_2019_path):
+    nela_2019_dir = Path(nela_2019_path)
+    labels_path = nela_2019_dir / 'labels.csv'
+    labels = pd.read_csv(labels_path)
+
+    reliable_sources = labels[labels['aggregated_label'] == 0.0]['source'].unique()
+    reliable_sources = pd.DataFrame(reliable_sources, columns=['source'])
+    reliable_sources['label'] = 'reliable'
+    unreliable_sources = labels[labels['aggregated_label'] == 2.0]['source'].unique()
+    unreliable_sources = pd.DataFrame(unreliable_sources, columns=['source'])
+    unreliable_sources['label'] = 'unreliable'
+    satire_sources = labels[labels['Media Bias / Fact Check, label'] == 'satire']['source'].unique()
+    satire_sources = pd.DataFrame(satire_sources, columns=['source'])
+    satire_sources['label'] = 'satire'
+
+    source_assessments = pd.concat([reliable_sources, unreliable_sources, satire_sources])
+    return source_assessments
+
+
 def process_nela(nela_2018_path: str, nela_2019_path: str):
     '''
     NELA 2018 has the following metadata:
