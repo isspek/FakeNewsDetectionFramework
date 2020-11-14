@@ -274,7 +274,7 @@ def add_generic_args(parser, root_dir) -> None:
         default="",
         type=str,
         required=True,
-        choices=['constraint', 'nela', 'history_constraint'],
+        choices=['style'],
         help="Fakenews tasks",
     )
 
