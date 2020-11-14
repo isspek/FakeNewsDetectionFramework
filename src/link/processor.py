@@ -2,7 +2,7 @@ from urlextract import URLExtract
 from url_normalize import url_normalize
 import requests
 import tldextract
-from src.data_reader import read_constraint_splits, read_nela_assessments
+from src.data_reader import read_constraint_splits, read_nela_assessments, read_simplewiki
 from src.logger import logger
 from tqdm import tqdm
 import re
@@ -22,11 +22,8 @@ class URLExtractor:
         if url.endswith('.'):
             url = url[: -1]
         try:
-            logger.info('I am here')
             session = requests.Session()
-            logger.info('I am requesting')
             resp = session.head(url, allow_redirects=True, timeout=5)
-            logger.info('I am normalizing')
             unshorten_url = resp.url
             return url_normalize(unshorten_url)
         except requests.exceptions.RequestException as e:
@@ -88,7 +85,7 @@ def extract_domains(mode):
     domains.to_csv(output_dir / f'domains_{mode}.tsv', sep='\t', index=False)
 
 
-def extract_features(mode, source_assessments):
+def extract_features(mode, source_assessments, simple_wiki):
     '''
     This function encodes url engagements and save them to TODO
     '''
@@ -98,21 +95,41 @@ def extract_features(mode, source_assessments):
     reliable_sources = source_assessements[source_assessments['label'] == 'reliable']['source'].unique()
     unreliable_sources = source_assessements[source_assessments['label'] == 'unreliable']['source'].unique()
 
+    tweet_links = []
     for tweet_id, link_arr in links.items():
+        processed_link = []
         if len(link_arr) > 0:
             for link in link_arr:
                 data = extract_url_metadata(link)
                 domain = data['domain']
 
                 if domain == 'twitter':
-                    domain = extract_username_from_tweet_url(link).lower()
+                    if extract_username_from_tweet_url(link):
+                        domain = extract_username_from_tweet_url(link).lower()
+                        data['twitter_user'] = domain
+
+                if domain == 'sky':
+                    domain = 'skynews'
 
                 logger.info(f'Requesting {domain}')
 
-                add_reliability(data, domain, reliable_sources, satire_sources, unreliable_sources)
+                data = add_reliability(data, domain, reliable_sources, satire_sources, unreliable_sources)
+                data = add_simplewiki_description(data, domain, simple_wiki)
+                processed_link.append(data)
+            assert len(processed_link) == len(link_arr)
+        tweet_links.append(processed_link)
+    assert len(tweet_links) == len(links)
+    tweet_links = {'links': tweet_links}
+    output_dir = Path('data')
+    json.dump(tweet_links, open(output_dir / f'{mode}_links_processed.json', 'w'))
 
-                reliability = data['reliability']
-                logger.info(f'Reliability {reliability}')
+
+def add_simplewiki_description(data, domain, simplewiki):
+    if domain in simplewiki:
+        data['simple_wiki'] = simplewiki[domain]
+    else:
+        data['simple_wiki'] = ''
+    return data
 
 
 def add_reliability(data, domain, reliable_sources, satire_sources, unreliable_sources):
@@ -144,6 +161,7 @@ if __name__ == '__main__':
     parser.add_argument("--extract_features", action='store_true')
     parser.add_argument("--extract_domains", action='store_true')
     parser.add_argument("--nela_2019", type=str)
+    parser.add_argument("--simple_wiki", type=str)
     args = parser.parse_args()
 
     if args.extract_link:
@@ -151,7 +169,8 @@ if __name__ == '__main__':
 
     if args.extract_features:
         source_assessements = read_nela_assessments(args.nela_2019)
-        extract_features(args.mode, source_assessments=source_assessements)
+        simple_wiki = read_simplewiki(args.simple_wiki)
+        extract_features(args.mode, source_assessments=source_assessements, simple_wiki=simple_wiki)
 
     if args.extract_domains:
         extract_domains(args.mode)

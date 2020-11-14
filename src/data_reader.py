@@ -27,6 +27,20 @@ def read_constraint_splits():
     }
 
 
+def normalize(domain):
+    domain = domain.strip()
+    domain = domain.replace(' ', '')
+    domain = domain.lower()
+    return domain
+
+
+def read_simplewiki(path: str):
+    wiki = pd.read_csv(path, sep='\t')[['title', 'text']]
+    title = wiki.title.map(lambda x: normalize(x)).to_list()
+    text = wiki.text.map(lambda x: x.lower()).to_list()
+    return dict(zip(title, text))
+
+
 def normalize_source(source: str):
     source = source.lower()
     source = source.strip()
