@@ -155,7 +155,7 @@ class History(Constraint):
             **config_kwargs
     ):
         """Initialize a model, tokenizer and config."""
-        super(hparams, config, model, **config_kwargs).__init__()
+        super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
         self.classifier = nn.Linear(self.config.hidden_size * 10, self.num_labels)
@@ -343,7 +343,7 @@ class HistoryLinksStyle(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + NUM_OF_PAST_CLAIMS) + 6,
+        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + NUM_OF_PAST_CLAIMS + 1) + 5,
                                     self.num_labels)  # 5 comes from reliability encoders, 1 comes from style
 
     def training_step(self, batch, batch_idx):
@@ -498,7 +498,7 @@ class HistoryLinks(Constraint):
     def training_step(self, batch, batch_idx):
         inputs = {'past_claims': batch[0],
                   'simple_wiki': batch[1], 'reliability': batch[2],
-                  'labels': batch[4]}
+                  'labels': batch[3]}
 
         outputs = self(**inputs)
         loss = outputs[0]

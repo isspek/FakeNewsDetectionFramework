@@ -316,10 +316,6 @@ class HistoryStyle(Constraint):
         logger.info(f'Total samples in training: {len(train_df)}')
         logger.info(f'Total samples in validation: {len(val_df)}')
 
-        # link results
-        train_links = json.load(open(self.hparams.link_train_path, 'r'))['links']
-        val_links = json.load(open(self.hparams.link_val_path, 'r'))['links']
-
         past_claims_data = []
         tweets_data = []
         for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
