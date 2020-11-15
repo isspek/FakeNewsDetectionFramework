@@ -2,6 +2,6 @@ urlextract==1.1.0
 url-normalize==1.4.2
 tldextract==2.2.3
 diskcache==5.0.3
-transformers == 3.0.12
+transformers == 3.12.4
 clean-text==0.3.0
-pytorch_lightning==1.0.3
+pytorch_lightning==1.0.6

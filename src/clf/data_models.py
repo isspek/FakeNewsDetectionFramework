@@ -246,7 +246,7 @@ class Links(Constraint):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -282,7 +282,7 @@ class Links(Constraint):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -435,7 +435,7 @@ class HistoryStyleLinks(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -495,7 +495,7 @@ class HistoryStyleLinks(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -557,7 +557,7 @@ class LinksStyle(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -600,7 +600,7 @@ class LinksStyle(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -677,7 +677,7 @@ class HistoryLinks(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
@@ -733,7 +733,7 @@ class HistoryLinks(Links):
                 if 'reliability' in link:
                     reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
                 else:
-                    reliability.append(torch.tensor(self.reliability2id['']))
+                    reliability.append(torch.tensor(self.reliability2id['na']))
 
             if len(links) < NUM_OF_PAST_URLS:
                 for _ in range(NUM_OF_PAST_URLS - len(links)):
