@@ -299,6 +299,72 @@ class Links(Constraint):
         self.val_dataset = TensorDataset(simple_wiki_data, reliability_data, labels)
 
 
+class LinksNoWiki(Constraint):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reliability2id = {'reliable': 0, 'unreliable': 1, 'satire': 2, 'na': 3, '': 4}
+
+    def setup(self, stage=None):
+        # tweets
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+
+        # link results
+        train_links = json.load(open(self.hparams.link_train_path, 'r'))['links']
+        val_links = json.load(open(self.hparams.link_val_path, 'r'))['links']
+
+        # Stats of dataset
+        logger.info(f'Total samples in training: {len(train_df)}')
+        logger.info(f'Total samples in validation: {len(val_df)}')
+
+        simple_wiki_data = []
+        reliability_data = []
+        for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
+            links = train_links[i]
+            reliability = []
+            for idx, link in enumerate(links):
+                if idx == NUM_OF_PAST_URLS:
+                    break
+                if 'reliability' in link:
+                    reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
+                else:
+                    reliability.append(torch.tensor(self.reliability2id['na']))
+
+            if len(links) < NUM_OF_PAST_URLS:
+                for _ in range(NUM_OF_PAST_URLS - len(links)):
+                    reliability.append(torch.tensor(self.reliability2id['']))
+            reliability_data.append(torch.stack(reliability))
+        reliability_data = torch.stack(reliability_data)
+        train_labels = train_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in train_labels])
+
+        self.train_dataset = TensorDataset(simple_wiki_data, reliability_data, labels)
+
+        reliability_data = []
+        for i, row in tqdm(val_df.iterrows(), total=len(val_df)):
+            links = val_links[i]
+
+            reliability = []
+            for idx, link in enumerate(links):
+                if idx == NUM_OF_PAST_URLS:
+                    break
+
+                if 'reliability' in link:
+                    reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
+                else:
+                    reliability.append(torch.tensor(self.reliability2id['na']))
+
+            if len(links) < NUM_OF_PAST_URLS:
+                for _ in range(NUM_OF_PAST_URLS - len(links)):
+                    reliability.append(torch.tensor(self.reliability2id['']))
+            reliability_data.append(torch.stack(reliability))
+        reliability_data = torch.stack(reliability_data)
+        val_labels = val_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in val_labels])
+
+        self.val_dataset = TensorDataset(simple_wiki_data, reliability_data, labels)
+
+
 class HistoryStyle(Constraint):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -752,12 +818,122 @@ class HistoryLinks(Links):
         self.val_dataset = TensorDataset(past_claims_data, simple_wiki_data, reliability_data, labels)
 
 
+class HistoryLinksNoWiki(Links):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup(self, stage=None):
+        # tweets
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+
+        # search results
+        train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
+        val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
+
+        # Stats of dataset
+        logger.info(f'Total samples in training: {len(train_df)}')
+        logger.info(f'Total samples in validation: {len(val_df)}')
+
+        # link results
+        train_links = json.load(open(self.hparams.link_train_path, 'r'))['links']
+        val_links = json.load(open(self.hparams.link_val_path, 'r'))['links']
+
+        past_claims_data = []
+        reliability_data = []
+        for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
+            links = train_links[i]
+            reliability = []
+            tweet = row.tweet
+            similar_false_claims = train_history_df[train_history_df['tweet_id'] == i]
+            similar_false_claims = similar_false_claims.fillna('')
+            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
+            cleaned_tweet = clean_helper(tweet)
+            past_claims = []
+            for claim in similar_false_claims:
+                cleaned_claim = clean_helper(claim)
+                input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet, cleaned_claim)
+                past_claims.append(torch.stack((input_ids, attention_mask)))
+
+            if len(past_claims) < NUM_OF_PAST_CLAIMS:
+                for _ in range(NUM_OF_PAST_CLAIMS - len(past_claims)):
+                    input_ids, attention_mask = self.encode_for_transformer('', cleaned_tweet)
+                    past_claims.append(torch.stack((input_ids, attention_mask)))
+            past_claims_data.append(torch.stack(past_claims))
+
+            for idx, link in enumerate(links):
+                if idx == NUM_OF_PAST_URLS:
+                    break
+                if 'reliability' in link:
+                    reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
+                else:
+                    reliability.append(torch.tensor(self.reliability2id['na']))
+
+            if len(links) < NUM_OF_PAST_URLS:
+                for _ in range(NUM_OF_PAST_URLS - len(links)):
+                    reliability.append(torch.tensor(self.reliability2id['']))
+            reliability_data.append(torch.stack(reliability))
+
+        past_claims_data = torch.stack(past_claims_data)
+        reliability_data = torch.stack(reliability_data)
+        train_labels = train_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in train_labels])
+
+        # num of samples, num of evidences, [input ids, attention mask], additional dim, length
+        self.train_dataset = TensorDataset(past_claims_data, reliability_data, labels)
+
+        past_claims_data = []
+        reliability_data = []
+        for i, row in tqdm(val_df.iterrows(), total=len(val_df)):
+            links = val_links[i]
+            reliability = []
+            tweet = row.tweet
+            similar_false_claims = val_history_df[val_history_df['tweet_id'] == i]
+            similar_false_claims = similar_false_claims.fillna('')
+            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
+            cleaned_tweet = clean_helper(tweet)
+            past_claims = []
+            for claim in similar_false_claims:
+                cleaned_claim = clean_helper(claim)
+                input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet, cleaned_claim)
+                past_claims.append(torch.stack((input_ids, attention_mask)))
+
+            if len(past_claims) < NUM_OF_PAST_CLAIMS:
+                for _ in range(NUM_OF_PAST_CLAIMS - len(past_claims)):
+                    input_ids, attention_mask = self.encode_for_transformer('', cleaned_tweet)
+                    past_claims.append(torch.stack((input_ids, attention_mask)))
+            past_claims_data.append(torch.stack(past_claims))
+
+            for idx, link in enumerate(links):
+                if idx == NUM_OF_PAST_URLS:
+                    break
+
+                if 'reliability' in link:
+                    reliability.append(torch.tensor(self.reliability2id[link['reliability']]))
+                else:
+                    reliability.append(torch.tensor(self.reliability2id['na']))
+
+            if len(links) < NUM_OF_PAST_URLS:
+                for _ in range(NUM_OF_PAST_URLS - len(links)):
+                    reliability.append(torch.tensor(self.reliability2id['']))
+            reliability_data.append(torch.stack(reliability))
+
+        past_claims_data = torch.stack(past_claims_data)
+        reliability_data = torch.stack(reliability_data)
+        val_labels = val_df.label.tolist()
+        labels = torch.tensor([self.labels2id[i] for i in val_labels])
+
+        self.val_dataset = TensorDataset(past_claims_data, reliability_data, labels)
+
+
 DATA_MODELS = {
     'style': Style,
     'history': History,
     'links': Links,
+    'links_nowiki': LinksNoWiki,
     'history_style': HistoryStyle,
     'history_links': HistoryLinks,
+    'history_links_nowiki': HistoryLinksNoWiki,
     'history_links_style': HistoryStyleLinks,
     'links_style': LinksStyle
 }
