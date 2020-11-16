@@ -3,11 +3,11 @@ urlextract==1.1.0
 url-normalize==1.4.2
 tldextract==2.2.3
 diskcache==5.0.3
-transformers == 3.12.4
-torch == 1.6.0
+torch == 1.7.0
 sklearn == 0.23.2
 clean-text==0.3.0
 pytorch_lightning==1.0.6
 bert-serving-client==1.9.8
 elasticsearch==7.0.4
 sentence-transformers==0.3.8
+transformers == 3.0.12
