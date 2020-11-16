@@ -920,7 +920,7 @@ if __name__ == "__main__":
             inputs = {'past_claims': batch[0].to(device), 'post': batch[1].to(device),
                       'simple_wiki': batch[2].to(device), 'reliability': batch[3].to(device),
                       'labels': batch[4].to(device)}
-        elif args.task == 'history_links_style_nowiki':
+        elif args.task == 'history_links_nowiki':
             inputs = {"past_claims": batch[0].to(device),
                       'reliability': batch[1].to(device),
                       'labels': batch[2].to(device)}
