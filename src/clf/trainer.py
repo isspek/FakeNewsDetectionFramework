@@ -422,8 +422,8 @@ class LinksStyle(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS) + 6,
-                                    self.num_labels)  # 5 comes from reliability encoders, 1 comes from style
+        self.classifier = nn.Linear((self.config.hidden_size* (NUM_OF_PAST_URLS+1)) + 5,
+                                    self.num_labels)  # 5 comes from reliability encoders, 1 comes from style and wiki
 
     def training_step(self, batch, batch_idx):
         inputs = {'post': batch[0],
