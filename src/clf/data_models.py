@@ -211,7 +211,8 @@ class History(Constraint):
 class Links(Constraint):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliability2id = {'reliable': 0, 'unreliable': 1, 'satire': 2, 'na': 3, '': 4}
+        self.reliability2id = {'reliable': [1, 0, 0, 0, 0], 'unreliable': [0, 1, 0, 0, 0], 'satire': [0, 0, 1, 0, 0],
+                               'na': [0, 0, 0, 1, 0], '': [0, 0, 0, 0, 1]}
 
     def setup(self, stage=None):
         # tweets
@@ -302,11 +303,13 @@ class Links(Constraint):
 class LinksNoWiki(Constraint):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reliability2id = {'reliable': 0, 'unreliable': 1, 'satire': 2, 'na': 3, '': 4}
+        self.reliability2id = {'reliable': [1, 0, 0, 0, 0], 'unreliable': [0, 1, 0, 0, 0], 'satire': [0, 0, 1, 0, 0],
+                               'na': [0, 0, 0, 1, 0], '': [0, 0, 0, 0, 1]}
 
     def setup(self, stage=None):
         # tweets
-        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')[
+                   :20]
         val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
 
         # link results
@@ -317,7 +320,6 @@ class LinksNoWiki(Constraint):
         logger.info(f'Total samples in training: {len(train_df)}')
         logger.info(f'Total samples in validation: {len(val_df)}')
 
-        simple_wiki_data = []
         reliability_data = []
         for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
             links = train_links[i]
@@ -338,7 +340,7 @@ class LinksNoWiki(Constraint):
         train_labels = train_df.label.tolist()
         labels = torch.tensor([self.labels2id[i] for i in train_labels])
 
-        self.train_dataset = TensorDataset(simple_wiki_data, reliability_data, labels)
+        self.train_dataset = TensorDataset(reliability_data, labels)
 
         reliability_data = []
         for i, row in tqdm(val_df.iterrows(), total=len(val_df)):
@@ -362,7 +364,7 @@ class LinksNoWiki(Constraint):
         val_labels = val_df.label.tolist()
         labels = torch.tensor([self.labels2id[i] for i in val_labels])
 
-        self.val_dataset = TensorDataset(simple_wiki_data, reliability_data, labels)
+        self.val_dataset = TensorDataset(reliability_data, labels)
 
 
 class HistoryStyle(Constraint):
