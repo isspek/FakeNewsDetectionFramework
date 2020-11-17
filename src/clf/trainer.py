@@ -567,7 +567,7 @@ class HistoryLinksNoWiki(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * NUM_OF_PAST_URLS + 5,
+        self.classifier = nn.Linear(self.config.hidden_size * NUM_OF_PAST_CLAIMS + 5,
                                     self.num_labels)  # 5 comes from reliability encoders
 
     def training_step(self, batch, batch_idx):
