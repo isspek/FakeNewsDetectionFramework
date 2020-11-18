@@ -299,7 +299,7 @@ class Links(Constraint):
         simple_wiki_len = simple_wiki.shape[1]
         concat_embeddings = []
         reliability = inputs['reliability']
-        reliability = reliability.contiguous().view(reliability.shape[0],-1)
+        reliability = reliability.contiguous().view(reliability.shape[0], -1)
         concat_embeddings.append(reliability)
         for i in range(simple_wiki_len):
             input_ids = simple_wiki[:, i, 0, :, :]
@@ -331,6 +331,7 @@ class Links(Constraint):
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
 
+
 class LinksNoWiki(Constraint):
     def __init__(
             self,
@@ -343,7 +344,7 @@ class LinksNoWiki(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(25,self.num_labels)  # 5 comes from reliability encoders
+        self.classifier = nn.Linear(25, self.num_labels)  # 5 comes from reliability encoders
 
     def training_step(self, batch, batch_idx):
         inputs = {"reliability": batch[0], "labels": batch[1]}
@@ -384,6 +385,7 @@ class LinksNoWiki(Constraint):
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
 
 class HistoryLinksStyle(Constraint):
     def __init__(
@@ -465,6 +467,76 @@ class HistoryLinksStyle(Constraint):
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
 
 
+class HistoryLinksStyleNoWiki(Constraint):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
+        super().__init__(hparams, config=config, model=model, **config_kwargs)
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_CLAIMS + 1) + 25,
+                                    self.num_labels)  # 5 comes from reliability encoders, 1 comes from style
+
+    def training_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1], 'reliability': batch[2],
+                  'labels': batch[3]}
+
+        outputs = self(**inputs)
+        loss = outputs[0]
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
+
+    def forward(self, **inputs):
+        past_claims = inputs['past_claims']
+        past_claims_len = past_claims.shape[1]
+        post = inputs['post']
+        labels = inputs['labels']
+        reliability = inputs['reliability']
+        reliability = reliability.contiguous().view(reliability.shape[0], -1)
+        concat_embeddings = []
+        concat_embeddings.append(reliability)
+        pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
+                                               attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
+        concat_embeddings.append(pooled_output)
+        for i in range(past_claims_len):
+            input_ids = past_claims[:, i, 0, :, :]
+            attention_masks = past_claims[:, i, 1, :, :]
+            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
+            # pooled_output = self.dropout(pooled_output)
+            concat_embeddings.append(pooled_output)
+        concat_embeddings = torch.cat(concat_embeddings, dim=1)
+        concat_embeddings = self.dropout(concat_embeddings)
+        logits = self.classifier(concat_embeddings)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits
+
+    def validation_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1], 'reliability': batch[2],
+                  'labels': batch[3]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
+
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+
 class LinksStyle(Constraint):
     def __init__(
             self,
@@ -477,7 +549,7 @@ class LinksStyle(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear((self.config.hidden_size* (NUM_OF_PAST_URLS+1)) + 25,
+        self.classifier = nn.Linear((self.config.hidden_size * (NUM_OF_PAST_URLS + 1)) + 25,
                                     self.num_labels)  # 5 comes from reliability encoders, 1 comes from style and wiki
 
     def training_step(self, batch, batch_idx):
@@ -718,7 +790,7 @@ def add_generic_args(parser, root_dir) -> None:
         type=str,
         required=True,
         choices=['history', 'links', 'history_style', 'history_links', 'links_style', 'history_links_style',
-                 'history_links_nowiki', 'links_nowiki'],
+                 'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki'],
         help="Fakenews tasks",
     )
 
@@ -914,7 +986,8 @@ MODELS = {
     'history_links_style': HistoryLinksStyle,
     'links_style': LinksStyle,
     'history_links_nowiki': HistoryLinksNoWiki,
-    'links_nowiki': LinksNoWiki
+    'links_nowiki': LinksNoWiki,
+    'history_links_style_nowiki': HistoryLinksStyleNoWiki
 }
 
 # %%
@@ -979,6 +1052,9 @@ if __name__ == "__main__":
             inputs = {'past_claims': batch[0].to(device), 'post': batch[1].to(device),
                       'simple_wiki': batch[2].to(device), 'reliability': batch[3].to(device),
                       'labels': batch[4].to(device)}
+        elif args.task == 'history_links_style_nowiki':
+            inputs = {'past_claims': batch[0].to(device), 'post': batch[1].to(device), 'reliability': batch[2].to(device),
+                      'labels': batch[3].to(device)}
         elif args.task == 'history_links_nowiki':
             inputs = {"past_claims": batch[0].to(device),
                       'reliability': batch[1].to(device),
@@ -986,7 +1062,6 @@ if __name__ == "__main__":
         elif args.task == 'links_nowiki':
             inputs = {'reliability': batch[0].to(device),
                       'labels': batch[1].to(device)}
-
 
         # forward pass
         with torch.no_grad():
