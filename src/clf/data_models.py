@@ -93,23 +93,25 @@ class Style(Constraint):
         super().__init__(*args, **kwargs)
 
     def setup(self, stage=None):
-        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
-        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
 
-        # Stats of dataset
-        logger.info(f'Total samples in training: {len(train_df)}')
-        logger.info(f'Total samples in validation: {len(val_df)}')
+        if self.hparams.train_path or self.hparams.do_train:
+            train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                   delimiter='\t')
+            logger.info(f'Total samples in training: {len(train_df)}')
+            attention_mask, input_ids, labels = self.encode_style(train_df)
+            self.train_dataset = TensorDataset(input_ids, attention_mask, labels)
 
-        # Get the lists of sentences and their labels.
+        if self.hparams.val_path:
+            val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+            logger.info(f'Total samples in validation: {len(val_df)}')
+            attention_mask, input_ids, labels = self.encode_style(val_df)
+            self.val_dataset = TensorDataset(input_ids, attention_mask, labels)
+
+    def encode_style(self, train_df):
         train_tweets = train_df.tweet.map(lambda x: clean_helper(x)).tolist()
         train_labels = train_df.label.tolist()
         input_ids, attention_mask, labels = self.encode_for_transformer(tweets=train_tweets, labels=train_labels)
-        self.train_dataset = TensorDataset(input_ids, attention_mask, labels)
-
-        val_tweets = val_df.tweet.map(lambda x: clean_helper(x)).tolist()
-        val_labels = val_df.label.tolist()
-        input_ids, attention_mask, labels = self.encode_for_transformer(tweets=val_tweets, labels=val_labels)
-        self.val_dataset = TensorDataset(input_ids, attention_mask, labels)
+        return attention_mask, input_ids, labels
 
     def encode_for_transformer(self, tweets, labels):
         encoded_tweets = self.tokenizer(
