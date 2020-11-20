@@ -393,7 +393,9 @@ if __name__ == "__main__":
     data = DATA_MODELS[args.task](args)
     data.prepare_data()
     data.setup()
-    args.dataset_size = len(data.train_dataloader())
+    #TODO change this!!!! make it optional
+    if args.do_train:
+        args.dataset_size = len(data.train_dataloader())
 
     model = TransformerModel(args)
 
