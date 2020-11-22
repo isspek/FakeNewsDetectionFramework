@@ -834,7 +834,9 @@ if __name__ == "__main__":
     data = DATA_MODELS[args.task](args)
     data.prepare_data()
     data.setup()
-    args.dataset_size = len(data.train_dataloader())
+
+    if args.do_train:
+        args.dataset_size = len(data.train_dataloader())
 
     model = MODELS[args.task](args)
 

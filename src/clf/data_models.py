@@ -150,18 +150,22 @@ class History(Constraint):
         super().__init__(*args, **kwargs)
 
     def setup(self, stage=None):
-        # tweets
-        train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
-        val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False, delimiter='\t')
+        if self.hparams.train_path or self.hparams.do_train:
+            train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                   delimiter='\t')
+            train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
+            logger.info(f'Total samples in training: {len(train_df)}')
+            data, labels = self.encode_history(train_df, train_history_df)
+            self.train_dataset = TensorDataset(data, labels)
 
-        # search results
-        train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
-        val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
+        if self.hparams.val_path:
+            val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                 delimiter='\t')
+            val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
+            data, labels = self.encode_history(val_df, val_history_df)
+            self.val_dataset = TensorDataset(data, labels)
 
-        # Stats of dataset
-        logger.info(f'Total samples in training: {len(train_df)}')
-        logger.info(f'Total samples in validation: {len(val_df)}')
-
+    def encode_history(self, train_df, train_history_df):
         data = []
         for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
             tweet = row.tweet
@@ -182,32 +186,7 @@ class History(Constraint):
         data = torch.stack(data)
         train_labels = train_df.label.tolist()
         labels = torch.tensor([self.labels2id[i] for i in train_labels])
-
-        # num of samples, num of evidences, [input ids, attention mask], additional dim, length
-        self.train_dataset = TensorDataset(data, labels)
-
-        data = []
-        for i, row in tqdm(val_df.iterrows(), total=len(val_df)):
-            tweet = row.tweet
-            similar_false_claims = val_history_df[val_history_df['tweet_id'] == i]
-            similar_false_claims = similar_false_claims.fillna('')
-            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
-            cleaned_tweet = clean_helper(tweet)
-            claims = []
-            for claim in similar_false_claims:
-                cleaned_claim = clean_helper(claim)
-                input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet, cleaned_claim)
-                claims.append(torch.stack((input_ids, attention_mask)))
-            if len(claims) < NUM_OF_PAST_CLAIMS:
-                for _ in range(NUM_OF_PAST_CLAIMS - len(claims)):
-                    input_ids, attention_mask = self.encode_for_transformer('', cleaned_tweet)
-                    claims.append(torch.stack((input_ids, attention_mask)))
-            data.append(torch.stack(claims))
-        data = torch.stack(data)
-        val_labels = val_df.label.tolist()
-        labels = torch.tensor([self.labels2id[i] for i in val_labels])
-
-        self.val_dataset = TensorDataset(data, labels)
+        return data, labels
 
 
 class Links(Constraint):
