@@ -22,6 +22,7 @@ from torch.utils.data.dataloader import DataLoader
 import pandas as pd
 from torch.nn.functional import softmax
 import torch.nn as nn
+from tqdm import tqdm
 
 
 class Constraint(pl.LightningModule):
@@ -145,6 +146,44 @@ class Constraint(pl.LightningModule):
         self.transformer_model.config.save_step = self.step_count
         self.transformer_model.save_pretrained(save_path)
 
+    def encode_post(self, post):
+        post = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
+                                      attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
+        post = self.dropout(post)
+        return post
+
+    def encode_reliability(self, reliability):
+        reliability = reliability.contiguous().view(reliability.shape[0], -1)
+        return reliability
+
+    def encode_history(self, past_claims):
+        past_claims_len = past_claims.shape[1]
+        past_claims_embedding = []
+        for i in range(past_claims_len):
+            input_ids = past_claims[:, i, 0, :, :]
+            attention_masks = past_claims[:, i, 1, :, :]
+            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
+            pooled_output = self.dropout(pooled_output)
+            past_claims_embedding.append(pooled_output)
+        past_claims_embedding = torch.sum(torch.stack(past_claims_embedding), dim=0)
+        past_claims_embedding = torch.div(past_claims_embedding, past_claims_len)
+        past_claims_embedding = self.dropout(past_claims_embedding)
+        return past_claims_embedding
+
+    def encode_wiki(self, simple_wiki):
+        simple_wiki_len = simple_wiki.shape[1]
+        simple_wiki_embedding = []
+        for i in range(simple_wiki_len):
+            input_ids = simple_wiki[:, i, 0, :, :]
+            attention_masks = simple_wiki[:, i, 1, :, :]
+            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
+            simple_wiki_embedding.append(pooled_output)
+        simple_wiki_embedding = torch.cat(simple_wiki_embedding, dim=1)
+        simple_wiki_embedding = self.dropout(simple_wiki_embedding)
+        return simple_wiki_embedding
+
 
 class History(Constraint):
     def __init__(
@@ -158,10 +197,12 @@ class History(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * 10, self.num_labels)
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        self.classifier = nn.Linear(1, self.num_labels)
+        self.classifier = nn.Linear(1, self.num_labels)
 
     def training_step(self, batch, batch_idx):
-        inputs = {"past_claims": batch[0], "labels": batch[1]}
+        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
 
         outputs = self(**inputs)
         loss = outputs[0]
@@ -171,18 +212,12 @@ class History(Constraint):
 
     def forward(self, **inputs):
         past_claims = inputs['past_claims']
-        labels = inputs['labels']
-        past_claims_len = past_claims.shape[1]
-        concat_embeddings = []
-        for i in range(past_claims_len):
-            input_ids = past_claims[:, i, 0, :, :]
-            attention_masks = past_claims[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            pooled_output = self.dropout(pooled_output)
-            concat_embeddings.append(pooled_output)
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        logits = self.classifier(concat_embeddings)
+        post = inputs['post']
+        labels = inputs['labels'] if 'labels' in inputs else None
+        post = self.encode_post(post)
+        past_claims = self.encode_history(past_claims)
+        sim_score = self.cos(past_claims, post).unsqueeze(dim=0)
+        logits = self.classifier(sim_score)
         loss = None
         if labels is not None:
             if self.num_labels == 1:
@@ -195,14 +230,23 @@ class History(Constraint):
         return loss, logits
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"past_claims": batch[0], "labels": batch[1]}
-
+        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
         preds = logits.detach().cpu().numpy()
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
-        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+        return {"val_loss": tmp_eval_loss.detach().cpu() if tmp_eval_loss else None, "pred": preds,
+                "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {"past_claims": batch[0], "post": batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 
 class HistoryStyle(History):
@@ -215,10 +259,15 @@ class HistoryStyle(History):
     ):
         """Initialize a model, tokenizer and config."""
         super().__init__(hparams, config=config, model=model, **config_kwargs)
-        self.classifier = nn.Linear(self.config.hidden_size * 11, self.num_labels)
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        self.classifier = nn.Linear(self.config.hidden_size + 1,
+                                    self.num_labels)
 
     def training_step(self, batch, batch_idx):
-        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'labels': batch[2]}
 
         outputs = self(**inputs)
         loss = outputs[0]
@@ -227,26 +276,21 @@ class HistoryStyle(History):
         return {"loss": loss, "log": tensorboard_logs}
 
     def forward(self, **inputs):
-        past_claims = inputs['past_claims']
+        labels = inputs['labels'] if 'labels' in inputs else None
 
-        labels = inputs['labels']
-        past_claims_len = past_claims.shape[1]
-        concat_embeddings = []
         post = inputs['post']
-        pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
-                                               attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
-        # pooled_output = self.dropout(pooled_output)
-        concat_embeddings.append(pooled_output)
-        for i in range(past_claims_len):
-            input_ids = past_claims[:, i, 0, :, :]
-            attention_masks = past_claims[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            # pooled_output = self.dropout(pooled_output)
-            concat_embeddings.append(pooled_output)
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        concat_embeddings = self.dropout(concat_embeddings)
-        logits = self.classifier(concat_embeddings)
+        post = self.encode_post(post)
+
+        past_claims = inputs['past_claims']
+        past_claims_embedding = self.encode_history(past_claims)
+        sim_score = self.cos(past_claims_embedding, post).unsqueeze(dim=0)
+
+        auxiliary_list = []
+        auxiliary_list.append(post)
+        auxiliary_list.append(sim_score)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
         loss = None
         if labels is not None:
             if self.num_labels == 1:
@@ -259,7 +303,8 @@ class HistoryStyle(History):
         return loss, logits
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"past_claims": batch[0], "post": batch[1], "labels": batch[2]}
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'labels': batch[2]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -267,6 +312,15 @@ class HistoryStyle(History):
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 
 class Links(Constraint):
@@ -281,11 +335,25 @@ class Links(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * NUM_OF_PAST_URLS + 25 + 155,
-                                    self.num_labels)  # 5 comes from reliability encoders
+        self.wiki = self.hparams.wiki
+        self.reliability = self.hparams.reliability
+        if self.wiki:
+            self.classifier = nn.Linear(self.config.hidden_size * NUM_OF_PAST_URLS,
+                                        self.num_labels)
+        elif self.reliability:
+            self.classifier = nn.Linear(20,
+                                        self.num_labels)  # 5 comes from reliability encoders
+        else:
+            self.classifier = nn.Linear(self.config.hidden_size * NUM_OF_PAST_URLS + 20,
+                                        self.num_labels)  # 5 comes from reliability encoders
 
     def training_step(self, batch, batch_idx):
-        inputs = {"simple_wiki": batch[0], "reliability": batch[1], "suffix": batch[2], "labels": batch[3]}
+        if self.wiki:
+            inputs = {'simple_wiki': batch[0], "labels": batch[1]}
+        elif self.reliability:
+            inputs = {"reliability": batch[0], "labels": batch[1]}
+        else:
+            inputs = {'simple_wiki': batch[0], 'reliability': batch[1], "labels": batch[2]}
 
         outputs = self(**inputs)
         loss = outputs[0]
@@ -294,30 +362,48 @@ class Links(Constraint):
         return {"loss": loss, "log": tensorboard_logs}
 
     def forward(self, **inputs):
-        simple_wiki = inputs['simple_wiki']
-        labels = inputs['labels']
-        simple_wiki_len = simple_wiki.shape[1]
-        concat_embeddings = []
-        for i in range(simple_wiki_len):
-            input_ids = simple_wiki[:, i, 0, :, :]
-            attention_masks = simple_wiki[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            concat_embeddings.append(pooled_output)
 
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        concat_embeddings = self.dropout(concat_embeddings)
-
+        labels = inputs['labels'] if 'labels' in inputs else None
         auxiliary_list = []
-        auxiliary_list.append(concat_embeddings)
-        reliability = inputs['reliability']
-        reliability = reliability.contiguous().view(reliability.shape[0], -1)
-        auxiliary_list.append(reliability)
-        suffix = inputs['suffix']
-        suffix = suffix.contiguous().view(suffix.shape[0], -1)
-        auxiliary_list.append(suffix)
+        if self.wiki:
+            simple_wiki = inputs['simple_wiki']
+            concat_embeddings = []
+            simple_wiki_len = simple_wiki.shape[1]
+            for i in range(simple_wiki_len):
+                input_ids = simple_wiki[:, i, 0, :, :]
+                attention_masks = simple_wiki[:, i, 1, :, :]
+                pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                       attention_mask=attention_masks.squeeze(dim=1))[1]
+                concat_embeddings.append(pooled_output)
+
+            concat_embeddings = torch.cat(concat_embeddings, dim=1)
+            concat_embeddings = self.dropout(concat_embeddings)
+            auxiliary_list.append(concat_embeddings)
+        elif self.reliability:
+            reliability = inputs['reliability']
+            reliability = reliability.contiguous().view(reliability.shape[0], -1)
+            auxiliary_list.append(reliability)
+        else:
+            simple_wiki = inputs['simple_wiki']
+            concat_embeddings = []
+            simple_wiki_len = simple_wiki.shape[1]
+            for i in range(simple_wiki_len):
+                input_ids = simple_wiki[:, i, 0, :, :]
+                attention_masks = simple_wiki[:, i, 1, :, :]
+                pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
+                                                       attention_mask=attention_masks.squeeze(dim=1))[1]
+                concat_embeddings.append(pooled_output)
+
+            concat_embeddings = torch.cat(concat_embeddings, dim=1)
+            concat_embeddings = self.dropout(concat_embeddings)
+            auxiliary_list.append(concat_embeddings)
+            reliability = inputs['reliability']
+            reliability = reliability.contiguous().view(reliability.shape[0], -1)
+            auxiliary_list.append(reliability)
+
         auxiliary_list = torch.cat(auxiliary_list, dim=1)
-        logits = self.classifier(auxiliary_list)
+        logits = self.classifier(auxiliary_list.float())
+        loss = None
         if labels is not None:
             if self.num_labels == 1:
                 #  We are doing regression
@@ -329,7 +415,12 @@ class Links(Constraint):
         return loss, logits
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"simple_wiki": batch[0], "reliability": batch[1], "suffix": batch[2], "labels": batch[3]}
+        if self.wiki:
+            inputs = {'simple_wiki': batch[0], "labels": batch[1]}
+        elif self.reliability:
+            inputs = {"reliability": batch[0], "labels": batch[1]}
+        else:
+            inputs = {'simple_wiki': batch[0], 'reliability': batch[1], "labels": batch[2]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -337,6 +428,83 @@ class Links(Constraint):
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        if self.wiki:
+            inputs = {'simple_wiki': batch[0]}
+        elif self.reliability:
+            inputs = {"reliability": batch[0]}
+        else:
+            inputs = {'simple_wiki': batch[0], 'reliability': batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
+
+
+class Style(Constraint):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
+        super().__init__(hparams, config=config, model=model, **config_kwargs)
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.classifier = nn.Linear(self.config.hidden_size,
+                                    self.num_labels)
+
+    def training_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'labels': batch[1]}
+
+        outputs = self(**inputs)
+        loss = outputs[0]
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
+
+    def forward(self, **inputs):
+        labels = inputs['labels'] if 'labels' in inputs else None
+
+        post = inputs['post']
+        post = self.encode_post(post)
+        logits = self.classifier(post)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits
+
+    def validation_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'labels': batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
+
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'post': batch[0]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 
 class HistoryLinksStyle(Constraint):
@@ -351,13 +519,14 @@ class HistoryLinksStyle(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + NUM_OF_PAST_CLAIMS + 1) + 25 + 155,
-                                    self.num_labels)  # 5 comes from reliability encoders, 1 comes from style
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + 1) + 21,
+                                    self.num_labels)
 
     def training_step(self, batch, batch_idx):
         inputs = {'past_claims': batch[0], 'post': batch[1],
-                  'simple_wiki': batch[2], 'reliability': batch[3], 'suffix': batch[4],
-                  'labels': batch[5]}
+                  'simple_wiki': batch[2], 'reliability': batch[3],
+                  'labels': batch[4]}
 
         outputs = self(**inputs)
         loss = outputs[0]
@@ -366,38 +535,29 @@ class HistoryLinksStyle(Constraint):
         return {"loss": loss, "log": tensorboard_logs}
 
     def forward(self, **inputs):
-        past_claims = inputs['past_claims']
-        past_claims_len = past_claims.shape[1]
+        labels = inputs['labels'] if 'labels' in inputs else None
+
         post = inputs['post']
+        post = self.encode_post(post)
+
         simple_wiki = inputs['simple_wiki']
-        labels = inputs['labels']
-        simple_wiki_len = simple_wiki.shape[1]
-        concat_embeddings = []
-        pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
-                                               attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
-        concat_embeddings.append(pooled_output)
-        for i in range(simple_wiki_len):
-            input_ids = simple_wiki[:, i, 0, :, :]
-            attention_masks = simple_wiki[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            concat_embeddings.append(pooled_output)
-        for i in range(past_claims_len):
-            input_ids = past_claims[:, i, 0, :, :]
-            attention_masks = past_claims[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            # pooled_output = self.dropout(pooled_output)
-            concat_embeddings.append(pooled_output)
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        concat_embeddings = self.dropout(concat_embeddings)
+        simple_wiki_embedding = self.encode_wiki(simple_wiki)
+
+        past_claims = inputs['past_claims']
+        past_claims_embedding = self.encode_history(past_claims)
+        sim_score = self.cos(past_claims_embedding, post).unsqueeze(dim=0)
+
         reliability = inputs['reliability']
-        reliability = reliability.contiguous().view(reliability.shape[0], -1)
-        suffix = inputs['suffix']
-        suffix = suffix.contiguous().view(suffix.shape[0], -1)
-        concat_embeddings.append(reliability)
-        concat_embeddings.append(suffix)
-        logits = self.classifier(concat_embeddings)
+        reliability = self.encode_reliability(reliability)
+
+        auxiliary_list = []
+        auxiliary_list.append(simple_wiki_embedding)
+        auxiliary_list.append(post)
+        auxiliary_list.append(sim_score)
+        auxiliary_list.append(reliability)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
         loss = None
         if labels is not None:
             if self.num_labels == 1:
@@ -411,8 +571,8 @@ class HistoryLinksStyle(Constraint):
 
     def validation_step(self, batch, batch_idx):
         inputs = {'past_claims': batch[0], 'post': batch[1],
-                  'simple_wiki': batch[2], 'reliability': batch[3], 'suffix': batch[4],
-                  'labels': batch[5]}
+                  'simple_wiki': batch[2], 'reliability': batch[3],
+                  'labels': batch[4]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -420,6 +580,16 @@ class HistoryLinksStyle(Constraint):
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'simple_wiki': batch[2], 'reliability': batch[3]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 
 class LinksStyle(Constraint):
@@ -434,8 +604,8 @@ class LinksStyle(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear((self.config.hidden_size * (NUM_OF_PAST_URLS + 1)) + 25 + 155,
-                                    self.num_labels)  # 5 comes from reliability encoders, 1 comes from style and wiki
+        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + 1) + 20,
+                                    self.num_labels)
 
     def training_step(self, batch, batch_idx):
         inputs = {'post': batch[0],
@@ -449,30 +619,24 @@ class LinksStyle(Constraint):
         return {"loss": loss, "log": tensorboard_logs}
 
     def forward(self, **inputs):
-        post = inputs['post']
-        simple_wiki = inputs['simple_wiki']
-        labels = inputs['labels']
-        simple_wiki_len = simple_wiki.shape[1]
-        reliability = inputs['reliability']
-        reliability = reliability.contiguous().view(reliability.shape[0], -1)
-        concat_embeddings = []
+        labels = inputs['labels'] if 'labels' in inputs else None
 
-        pooled_output = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
-                                               attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
-        concat_embeddings.append(pooled_output)
-        for i in range(simple_wiki_len):
-            input_ids = simple_wiki[:, i, 0, :, :]
-            attention_masks = simple_wiki[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            concat_embeddings.append(pooled_output)
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        concat_embeddings = self.dropout(concat_embeddings)
-        concat_embeddings.append(reliability)
-        suffix = inputs['suffix']
-        suffix = suffix.contiguous().view(suffix.shape[0], -1)
-        concat_embeddings.append(suffix)
-        logits = self.classifier(concat_embeddings)
+        post = inputs['post']
+        post = self.encode_post(post)
+
+        simple_wiki = inputs['simple_wiki']
+        simple_wiki_embedding = self.encode_wiki(simple_wiki)
+
+        reliability = inputs['reliability']
+        reliability = self.encode_reliability(reliability)
+
+        auxiliary_list = []
+        auxiliary_list.append(simple_wiki_embedding)
+        auxiliary_list.append(post)
+        auxiliary_list.append(reliability)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
         loss = None
         if labels is not None:
             if self.num_labels == 1:
@@ -486,8 +650,8 @@ class LinksStyle(Constraint):
 
     def validation_step(self, batch, batch_idx):
         inputs = {'post': batch[0],
-                  'simple_wiki': batch[1], 'reliability': batch[2], 'suffix': batch[3],
-                  'labels': batch[4]}
+                  'simple_wiki': batch[1], 'reliability': batch[2],
+                  'labels': batch[3]}
 
         outputs = self(**inputs)
         tmp_eval_loss, logits = outputs[:2]
@@ -495,6 +659,16 @@ class LinksStyle(Constraint):
         out_label_ids = inputs["labels"].detach().cpu().numpy()
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'simple_wiki': batch[1], 'reliability': batch[2]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 
 class HistoryLinks(Constraint):
@@ -509,12 +683,13 @@ class HistoryLinks(Constraint):
         super().__init__(hparams, config=config, model=model, **config_kwargs)
         self.num_labels = self.config.num_labels
         self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS + NUM_OF_PAST_CLAIMS) + 25 + 155,
-                                    self.num_labels)  # 5 comes from reliability encoders
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        self.classifier = nn.Linear(self.config.hidden_size * (NUM_OF_PAST_URLS) + 21,
+                                    self.num_labels)
 
     def training_step(self, batch, batch_idx):
-        inputs = {'past_claims': batch[0],
-                  'simple_wiki': batch[1], 'reliability': batch[2], 'suffix': batch[3],
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'simple_wiki': batch[2], 'reliability': batch[3],
                   'labels': batch[4]}
 
         outputs = self(**inputs)
@@ -524,35 +699,28 @@ class HistoryLinks(Constraint):
         return {"loss": loss, "log": tensorboard_logs}
 
     def forward(self, **inputs):
-        past_claims = inputs['past_claims']
-        past_claims_len = past_claims.shape[1]
-        simple_wiki = inputs['simple_wiki']
-        labels = inputs['labels']
-        simple_wiki_len = simple_wiki.shape[1]
-        reliability = inputs['reliability']
-        reliability = reliability.contiguous().view(reliability.shape[0], -1)
-        concat_embeddings = []
+        labels = inputs['labels'] if 'labels' in inputs else None
 
-        for i in range(simple_wiki_len):
-            input_ids = simple_wiki[:, i, 0, :, :]
-            attention_masks = simple_wiki[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            concat_embeddings.append(pooled_output)
-        for i in range(past_claims_len):
-            input_ids = past_claims[:, i, 0, :, :]
-            attention_masks = past_claims[:, i, 1, :, :]
-            pooled_output = self.transformer_model(input_ids.squeeze(dim=1), token_type_ids=None,
-                                                   attention_mask=attention_masks.squeeze(dim=1))[1]
-            # pooled_output = self.dropout(pooled_output)
-            concat_embeddings.append(pooled_output)
-        concat_embeddings = torch.cat(concat_embeddings, dim=1)
-        concat_embeddings = self.dropout(concat_embeddings)
-        concat_embeddings.append(reliability)
-        suffix = inputs['suffix']
-        suffix = suffix.contiguous().view(suffix.shape[0], -1)
-        concat_embeddings.append(suffix)
-        logits = self.classifier(concat_embeddings)
+        post = inputs['post']
+        post = self.encode_post(post)
+
+        simple_wiki = inputs['simple_wiki']
+        simple_wiki_embedding = self.encode_wiki(simple_wiki)
+
+        past_claims = inputs['past_claims']
+        past_claims_embedding = self.encode_history(past_claims)
+        sim_score = self.cos(past_claims_embedding, post).unsqueeze(dim=0)
+
+        reliability = inputs['reliability']
+        reliability = self.encode_reliability(reliability)
+
+        auxiliary_list = []
+        auxiliary_list.append(simple_wiki_embedding)
+        auxiliary_list.append(sim_score)
+        auxiliary_list.append(reliability)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
         loss = None
         if labels is not None:
             if self.num_labels == 1:
@@ -565,8 +733,8 @@ class HistoryLinks(Constraint):
         return loss, logits
 
     def validation_step(self, batch, batch_idx):
-        inputs = {'past_claims': batch[0],
-                  'simple_wiki': batch[1], 'reliability': batch[2], 'suffix': batch[3],
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'simple_wiki': batch[2], 'reliability': batch[3],
                   'labels': batch[4]}
 
         outputs = self(**inputs)
@@ -576,6 +744,15 @@ class HistoryLinks(Constraint):
 
         return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
 
+    def test_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'simple_wiki': batch[2], 'reliability': batch[3]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
 
 class LoggingCallback(pl.Callback):
     def on_batch_end(self, trainer, pl_module):
@@ -618,7 +795,7 @@ def add_generic_args(parser, root_dir) -> None:
         type=str,
         required=True,
         choices=['history', 'links', 'history_style', 'history_links', 'links_style', 'history_links_style',
-                 'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki', 'history_links_style_onlywiki'],
+                 'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki', 'history_links_style_onlywiki', 'style'],
         help="Fakenews tasks",
     )
 
@@ -664,10 +841,13 @@ def add_generic_args(parser, root_dir) -> None:
 
     parser.add_argument("--train_path", type=str, help="path for train set")
     parser.add_argument("--val_path", type=str, help="path for dev set")
+    parser.add_argument("--test_path", type=str, help="path for test set")
     parser.add_argument("--history_train_path", type=str, help="path for search results of train set")
     parser.add_argument("--history_val_path", type=str, help="path for search results of val set")
+    parser.add_argument("--history_test_path", type=str, help="path for search results of val set")
     parser.add_argument("--link_train_path", type=str, help="path for links of train set")
     parser.add_argument("--link_val_path", type=str, help="path for links of val set")
+    parser.add_argument("--link_test_path", type=str, help="path for links of val set")
 
     parser.add_argument(
         "--num_labels",
@@ -732,6 +912,8 @@ def add_generic_args(parser, root_dir) -> None:
     parser.add_argument("--num_train_epochs", dest="max_epochs", default=3, type=int)
     parser.add_argument("--train_batch_size", default=32, type=int)
     parser.add_argument("--eval_batch_size", default=32, type=int)
+    parser.add_argument("--wiki", action="store_true")
+    parser.add_argument("--reliability", action="store_true")
     parser.add_argument("--adafactor", action="store_true")
 
     return parser
@@ -807,6 +989,7 @@ def mask_fill(
 
 
 MODELS = {
+    'style': Style,
     'history': History,
     'links': Links,
     'history_style': HistoryStyle,
@@ -842,11 +1025,14 @@ if __name__ == "__main__":
 
     # train model
     trainer = generic_train(model, data, args)
+
+    loader = data.test_dataloader()
     # Optionally, predict on dev set and write to output_dir
-    if args.do_predict:
-        checkpoints = list(sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-epoch=*.ckpt"), recursive=True)))
-        model = model.load_from_checkpoint(checkpoints[-1])
-        results = trainer.test(model, test_dataloaders=data.val_dataloader())
+    # if args.do_predict:
+    # loader = data.val_dataloader()
+    checkpoints = list(sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-epoch=*.ckpt"), recursive=True)))
+    model = model.load_from_checkpoint(checkpoints[-1])
+    #     results = trainer.test(model, test_dataloaders=loader)
     # %%
 
     # inference
@@ -859,28 +1045,31 @@ if __name__ == "__main__":
     device = torch.device('cuda')
     model.to(device)
     model.eval()
-    for ix, batch in enumerate(data.val_dataloader()):
+    for ix, batch in enumerate(loader):
         if args.task == 'history':
-            inputs = {"past_claims": batch[0].to(device), "labels": batch[1].to(device)}
+            # inputs = {"past_claims": batch[0].to(device)}
+            inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device)}
         elif args.task == 'history_style':
-            inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device), "labels": batch[2].to(device)}
+            inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device)}
         elif args.task == 'links':
-            inputs = {'simple_wiki': batch[0].to(device), 'reliability': batch[1].to(device),
-                      'suffix': batch[2].to(device),
-                      'labels': batch[3].to(device)}
+            if args.wiki:
+                inputs = {'simple_wiki': batch[0].to(device)}
+                # inputs = {'simple_wiki': batch[0].to(device), 'reliability': batch[1].to(device)}
+            elif args.reliability:
+                inputs = {'reliability': batch[0].to(device)}
+            else:
+                inputs = {'simple_wiki': batch[0].to(device), 'reliability': batch[1].to(device)}
         elif args.task == 'history_links':
-            inputs = {"past_claims": batch[0].to(device), 'simple_wiki': batch[1].to(device),
-                      'reliability': batch[2].to(device), 'suffix': batch[3].to(device),
-                      'labels': batch[4].to(device)}
+                inputs = {"past_claims": batch[0].to(device), 'post': batch[1].to(device), 'simple_wiki': batch[2].to(device),
+                          'reliability': batch[3].to(device)}
         elif args.task == 'links_style':
             inputs = {'post': batch[0].to(device), 'simple_wiki': batch[1].to(device),
-                      'reliability': batch[2].to(device), 'suffix': batch[3].to(device),
-                      'labels': batch[4].to(device)}
+                      'reliability': batch[2].to(device)}
         elif args.task == 'history_links_style':
             inputs = {'past_claims': batch[0].to(device), 'post': batch[1].to(device),
-                      'simple_wiki': batch[2].to(device), 'reliability': batch[3].to(device),
-                      'suffix': batch[4].to(device),
-                      'labels': batch[5].to(device)}
+                      'simple_wiki': batch[2].to(device), 'reliability': batch[3].to(device)}
+        elif args.task == 'style':
+            inputs = {"post": batch[0].to(device)}
         # forward pass
         with torch.no_grad():
             outputs = model(**inputs)
@@ -889,12 +1078,13 @@ if __name__ == "__main__":
             top_p, _ = prob.topk(1, dim=1)
             probs.append(top_p.cpu().numpy().item())
             preds.append(int(torch.argmax(logits).cpu().numpy().item()))
-        labels.append(inputs["labels"].cpu().numpy().item())
+        # labels.append(inputs["labels"].cpu().numpy().item())
     preds = [data.id2labels[pred] for pred in preds]
-    labels = [data.id2labels[label] for label in labels]
+    # labels = [data.id2labels[label] for label in labels]
+
     validation = pd.DataFrame({
         'predictions': preds,
         'probs': probs,
-        'labels': labels
+        'labels': None
     })
-    validation.to_csv(os.path.join(args.output_dir, 'val_results.csv'))
+    validation.to_csv(os.path.join(args.output_dir, 'test_results.csv'))

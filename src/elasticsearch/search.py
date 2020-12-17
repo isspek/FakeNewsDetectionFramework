@@ -119,8 +119,6 @@ def format_scores(scores):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tweets", "-t", required=True,
-                        help="TSV file with tweets. Format: tweet_id tweet_content")
     parser.add_argument("--keys", "-k", default=['content', 'title'],
                         help="Keys to search in the document")
     parser.add_argument("--size", "-s", default=10,
@@ -128,6 +126,7 @@ def parse_args():
     parser.add_argument("--conn", "-c", default="127.0.0.1:9200",
                         help="HTTP/S URI to a instance of ElasticSearch")
     parser.add_argument("--option", type=str, choices=['default', 'semantic'])
+    parser.add_argument("--mode", type=str, choices=['train', 'val', 'test'])
     parser.add_argument("--index_file_path", type=str)
     return parser.parse_args()
 
@@ -137,23 +136,21 @@ def main(args):
     fakehealth = pd.read_csv(claims_dir / 'FakeHealth.tsv', sep='\t')
     fakehealth = fakehealth[fakehealth['label'] == 'fake']
     fakehealth = fakehealth.fillna('')  # replace Nan fields
-    health_review = pd.read_csv(claims_dir / 'HealthReview.tsv', sep='\t')
 
-    previous_claims = pd.concat([fakehealth, health_review])
+    #TODO add more data
+    # health_review = pd.read_csv(claims_dir / 'HealthReview.tsv', sep='\t')
+    # previous_claims = pd.concat([fakehealth, health_review])
 
-    data = read_constraint_splits()
-    train = data['train']
-    val = data['val']
+    previous_claims = fakehealth
+    mode = args.mode
 
+    data = read_constraint_splits()[mode]
     es = create_connection(args.conn)
     build_index(es, previous_claims, index_file_path=args.index_file_path, fieldnames=args.keys)
 
     output_dir = Path('data')
-    results = get_results(es, train, option=args.option, search_keys=args.keys, size=args.size)
-    results.to_csv(output_dir / f'{args.option}_train_results.tsv', sep='\t', index=False)
-
-    results = get_results(es, val, option=args.option, search_keys=args.keys, size=args.size)
-    results.to_csv(output_dir / f'{args.option}_val_results.tsv', sep='\t', index=False)
+    results = get_results(es, data, option=args.option, search_keys=args.keys, size=args.size)
+    results.to_csv(output_dir / f'{args.option}_{mode}_results.tsv', sep='\t', index=False)
 
     clear_index(es)
 

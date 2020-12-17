@@ -19,11 +19,14 @@ RESAMPLE_LIMIT = 100
 def read_constraint_splits():
     train_fpath = DATA_DIR / 'train.tsv'
     val_fpath = DATA_DIR / 'val.tsv'
+    test_fpath = DATA_DIR / 'test.tsv'
     train = pd.read_csv(train_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
     val = pd.read_csv(val_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    test = pd.read_csv(test_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
     return {
         'train': train,
-        'val': val
+        'val': val,
+        'test': test
     }
 
 

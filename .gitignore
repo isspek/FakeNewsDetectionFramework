@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+/baseline/covid19-fake-news-detection/
+0
+42
+36
