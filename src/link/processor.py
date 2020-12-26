@@ -156,7 +156,7 @@ def extract_save_urls(mode):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", "-m", required=True,
-                        help="Choose train or dev set", choices=['train', 'val'])
+                        help="Choose train, dev or test set", choices=['train', 'val', 'test'])
     parser.add_argument("--extract_link", action='store_true')
     parser.add_argument("--extract_features", action='store_true')
     parser.add_argument("--extract_domains", action='store_true')
