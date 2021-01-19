@@ -60,12 +60,13 @@ class Constraint(pl.LightningModule):
                 setattr(self.config, p, getattr(self.hparams, p))
 
         self.model_type = AutoModel
+        self.config.output_attentions = True
         if model is None:
             self.transformer_model = self.model_type.from_pretrained(
                 self.hparams.model_name_or_path,
                 from_tf=bool(".ckpt" in self.hparams.model_name_or_path),
                 config=self.config,
-                cache_dir=self.cache_dir,
+                cache_dir=self.cache_dir
             )
         else:
             self.transformer_model = model
@@ -148,7 +149,7 @@ class Constraint(pl.LightningModule):
 
     def encode_post(self, post):
         post = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
-                                      attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
+                                          attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
         post = self.dropout(post)
         return post
 
@@ -474,6 +475,7 @@ class Style(Constraint):
 
         post = inputs['post']
         post = self.encode_post(post)
+        print(post)
         logits = self.classifier(post)
         loss = None
         if labels is not None:
@@ -754,6 +756,7 @@ class HistoryLinks(Constraint):
 
         return {"pred": preds}
 
+
 class LoggingCallback(pl.Callback):
     def on_batch_end(self, trainer, pl_module):
         lr_scheduler = trainer.lr_schedulers[0]["scheduler"]
@@ -795,7 +798,8 @@ def add_generic_args(parser, root_dir) -> None:
         type=str,
         required=True,
         choices=['history', 'links', 'history_style', 'history_links', 'links_style', 'history_links_style',
-                 'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki', 'history_links_style_onlywiki', 'style'],
+                 'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki', 'history_links_style_onlywiki',
+                 'style'],
         help="Fakenews tasks",
     )
 
@@ -915,6 +919,7 @@ def add_generic_args(parser, root_dir) -> None:
     parser.add_argument("--wiki", action="store_true")
     parser.add_argument("--reliability", action="store_true")
     parser.add_argument("--adafactor", action="store_true")
+    parser.add_argument("--output_attention", action="store_true")
 
     return parser
 
@@ -1060,8 +1065,9 @@ if __name__ == "__main__":
             else:
                 inputs = {'simple_wiki': batch[0].to(device), 'reliability': batch[1].to(device)}
         elif args.task == 'history_links':
-                inputs = {"past_claims": batch[0].to(device), 'post': batch[1].to(device), 'simple_wiki': batch[2].to(device),
-                          'reliability': batch[3].to(device)}
+            inputs = {"past_claims": batch[0].to(device), 'post': batch[1].to(device),
+                      'simple_wiki': batch[2].to(device),
+                      'reliability': batch[3].to(device)}
         elif args.task == 'links_style':
             inputs = {'post': batch[0].to(device), 'simple_wiki': batch[1].to(device),
                       'reliability': batch[2].to(device)}

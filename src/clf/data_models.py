@@ -191,7 +191,7 @@ class Style(Constraint):
         if self.hparams.test_path:
             test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
                                   delimiter='\t')
-            post_data = self.encode_post(test_df)
+            post_data = self.encode_post(test_df)[2130:2132]
             self.test_dataset = TensorDataset(post_data)
 
 class History(Constraint):
