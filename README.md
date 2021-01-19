@@ -7,7 +7,7 @@
 * `scripts/links_ops.sh` is used for extracting link information on the posts
 * `scripts/train_server.sh` is used for training the components of the ECOL
 
-Trained models can be downloaded from [this link](https://www.dropbox.com/sh/yn078rcvv6zfgia/AADT4rVCpYxEtLO46JETj4mTa?dl=0).
+Trained models and processed data can be downloaded from [this link](https://www.dropbox.com/sh/yn078rcvv6zfgia/AADT4rVCpYxEtLO46JETj4mTa?dl=0).
 
 # Datasets
 The list of additional datasets for training/testing some of the components of the framework:
