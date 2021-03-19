@@ -149,13 +149,17 @@ class Constraint(pl.LightningModule):
 
     def encode_post(self, post):
         post = self.transformer_model(post[:, 0, :, :].squeeze(dim=1), token_type_ids=None,
-                                          attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
+                                      attention_mask=post[:, 1, :, :].squeeze(dim=1))[1]
         post = self.dropout(post)
         return post
 
     def encode_reliability(self, reliability):
         reliability = reliability.contiguous().view(reliability.shape[0], -1)
         return reliability
+
+    def encode_topics(self, topics):
+        topics = topics.contiguous().view(topics.shape[0], -1)
+        return topics
 
     def encode_history(self, past_claims):
         past_claims_len = past_claims.shape[1]
@@ -287,8 +291,83 @@ class HistoryStyle(History):
         sim_score = self.cos(past_claims_embedding, post).unsqueeze(dim=0)
 
         auxiliary_list = []
+        cos_sims = []
+        cos_sims.append(sim_score)
         auxiliary_list.append(post)
         auxiliary_list.append(sim_score)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits, auxiliary_list, cos_sims
+
+    def validation_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'labels': batch[2]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
+
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
+
+class HistoryStyleV2(History):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
+        super().__init__(hparams, config=config, model=model, **config_kwargs)
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        self.classifier = nn.Linear(self.config.hidden_size + self.config.hidden_size,
+                                    self.num_labels)
+
+    def training_step(self, batch, batch_idx):
+        inputs = {'past_claims': batch[0], 'post': batch[1],
+                  'labels': batch[2]}
+
+        outputs = self(**inputs)
+        loss = outputs[0]
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
+
+    def forward(self, **inputs):
+        labels = inputs['labels'] if 'labels' in inputs else None
+
+        post = inputs['post']
+        post = self.encode_post(post)
+
+        past_claims = inputs['past_claims']
+        past_claims_embedding = self.encode_history(past_claims)
+        # sim_score = self.cos(past_claims_embedding, post).unsqueeze(dim=0)
+
+        auxiliary_list = []
+        auxiliary_list.append(post)
+        auxiliary_list.append(past_claims_embedding)
         auxiliary_list = torch.cat(auxiliary_list, dim=1)
 
         logits = self.classifier(auxiliary_list)
@@ -475,7 +554,6 @@ class Style(Constraint):
 
         post = inputs['post']
         post = self.encode_post(post)
-        print(post)
         logits = self.classifier(post)
         loss = None
         if labels is not None:
@@ -486,7 +564,7 @@ class Style(Constraint):
             else:
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-        return loss, logits
+        return loss, logits, post
 
     def validation_step(self, batch, batch_idx):
         inputs = {'post': batch[0],
@@ -673,6 +751,81 @@ class LinksStyle(Constraint):
         return {"pred": preds}
 
 
+class TopicStyle(Constraint):
+    def __init__(
+            self,
+            hparams: argparse.Namespace,
+            config=None,
+            model=None,
+            **config_kwargs
+    ):
+        """Initialize a model, tokenizer and config."""
+        super().__init__(hparams, config=config, model=model, **config_kwargs)
+        self.num_labels = self.config.num_labels
+        self.dropout = nn.Dropout(self.config.hidden_dropout_prob)
+        self.classifier = nn.Linear(self.config.hidden_size + 20,
+                                    self.num_labels)
+
+    def training_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'topics': batch[1],
+                  'labels': batch[2]}
+
+        outputs = self(**inputs)
+        loss = outputs[0]
+        lr_scheduler = self.trainer.lr_schedulers[0]["scheduler"]
+        tensorboard_logs = {"loss": loss, "rate": lr_scheduler.get_last_lr()[-1]}
+        return {"loss": loss, "log": tensorboard_logs}
+
+    def forward(self, **inputs):
+        labels = inputs['labels'] if 'labels' in inputs else None
+
+        post = inputs['post']
+        post = self.encode_post(post)
+
+        topics = inputs['topics']
+        topics = self.encode_topics(topics)
+
+        auxiliary_list = []
+        auxiliary_list.append(post)
+        auxiliary_list.append(topics)
+        auxiliary_list = torch.cat(auxiliary_list, dim=1)
+
+        logits = self.classifier(auxiliary_list)
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                #  We are doing regression
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        return loss, logits, auxiliary_list
+
+    def validation_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'topics': batch[1],
+                  'labels': batch[2]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+        out_label_ids = inputs["labels"].detach().cpu().numpy()
+
+        return {"val_loss": tmp_eval_loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+
+    def test_step(self, batch, batch_idx):
+        inputs = {'post': batch[0],
+                  'topics': batch[1]}
+
+        outputs = self(**inputs)
+        tmp_eval_loss, logits = outputs[:2]
+        preds = logits.detach().cpu().numpy()
+
+        return {"pred": preds}
+
+
 class HistoryLinks(Constraint):
     def __init__(
             self,
@@ -796,10 +949,9 @@ def add_generic_args(parser, root_dir) -> None:
         "--task",
         default="",
         type=str,
-        required=True,
         choices=['history', 'links', 'history_style', 'history_links', 'links_style', 'history_links_style',
                  'history_links_nowiki', 'links_nowiki', 'history_links_style_nowiki', 'history_links_style_onlywiki',
-                 'style'],
+                 'style', 'topic_style'],
         help="Fakenews tasks",
     )
 
@@ -814,7 +966,6 @@ def add_generic_args(parser, root_dir) -> None:
         "--output_dir",
         default=None,
         type=str,
-        required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -852,19 +1003,22 @@ def add_generic_args(parser, root_dir) -> None:
     parser.add_argument("--link_train_path", type=str, help="path for links of train set")
     parser.add_argument("--link_val_path", type=str, help="path for links of val set")
     parser.add_argument("--link_test_path", type=str, help="path for links of val set")
+    parser.add_argument("--output_fname", type=str, default='test_results.csv')
+    parser.add_argument("--col_name", type=str,
+                        help='column name of the dataset which presents textual field e.g content or tweet')
+    parser.add_argument("--data", type=str,
+                        help='dataset name, it might be required to handle errors', default='na')
 
     parser.add_argument(
         "--num_labels",
         default=2,
         type=int,
-        required=True,
         help="Add number of class for the classification",
     )
     parser.add_argument(
         "--model_name_or_path",
         default=None,
         type=str,
-        required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models",
     )
     parser.add_argument(
@@ -916,6 +1070,7 @@ def add_generic_args(parser, root_dir) -> None:
     parser.add_argument("--num_train_epochs", dest="max_epochs", default=3, type=int)
     parser.add_argument("--train_batch_size", default=32, type=int)
     parser.add_argument("--eval_batch_size", default=32, type=int)
+    parser.add_argument("--test_batch_size", default=32, type=int)
     parser.add_argument("--wiki", action="store_true")
     parser.add_argument("--reliability", action="store_true")
     parser.add_argument("--adafactor", action="store_true")
@@ -997,7 +1152,9 @@ MODELS = {
     'style': Style,
     'history': History,
     'links': Links,
+    'topic_style': TopicStyle,
     'history_style': HistoryStyle,
+    'history_style_v2': HistoryStyleV2,
     'history_links': HistoryLinks,
     'history_links_style': HistoryLinksStyle,
     'links_style': LinksStyle,
@@ -1037,14 +1194,9 @@ if __name__ == "__main__":
     # loader = data.val_dataloader()
     checkpoints = list(sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-epoch=*.ckpt"), recursive=True)))
     model = model.load_from_checkpoint(checkpoints[-1])
-    #     results = trainer.test(model, test_dataloaders=loader)
-    # %%
 
     # inference
     preds = []
-    input_ids = []
-    masks = []
-    labels = []
     probs = []
 
     device = torch.device('cuda')
@@ -1054,7 +1206,7 @@ if __name__ == "__main__":
         if args.task == 'history':
             # inputs = {"past_claims": batch[0].to(device)}
             inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device)}
-        elif args.task == 'history_style':
+        elif args.task == 'history_style' or args.task == 'history_style_v2':
             inputs = {"past_claims": batch[0].to(device), "post": batch[1].to(device)}
         elif args.task == 'links':
             if args.wiki:
@@ -1064,6 +1216,8 @@ if __name__ == "__main__":
                 inputs = {'reliability': batch[0].to(device)}
             else:
                 inputs = {'simple_wiki': batch[0].to(device), 'reliability': batch[1].to(device)}
+        elif args.task == 'topic_style':
+            inputs = {'post': batch[0].to(device), 'topics': batch[1].to(device)}
         elif args.task == 'history_links':
             inputs = {"past_claims": batch[0].to(device), 'post': batch[1].to(device),
                       'simple_wiki': batch[2].to(device),
@@ -1081,16 +1235,15 @@ if __name__ == "__main__":
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
             prob = softmax(logits, dim=1)
-            top_p, _ = prob.topk(1, dim=1)
-            probs.append(top_p.cpu().numpy().item())
+            probs.append(torch.max(prob).cpu().detach().numpy().item())
             preds.append(int(torch.argmax(logits).cpu().numpy().item()))
         # labels.append(inputs["labels"].cpu().numpy().item())
+
     preds = [data.id2labels[pred] for pred in preds]
     # labels = [data.id2labels[label] for label in labels]
 
     validation = pd.DataFrame({
         'predictions': preds,
         'probs': probs,
-        'labels': None
     })
-    validation.to_csv(os.path.join(args.output_dir, 'test_results.csv'))
+    validation.to_csv(os.path.join(args.output_dir, args.output_fname))

@@ -2,7 +2,7 @@ pandas==1.1.2
 urlextract==1.1.0
 url-normalize==1.4.2
 tldextract==2.2.3
-torch == 1.7.0
+torch==1.7.0
 clean-text==0.3.0
 pytorch_lightning==1.0.6
 bert-serving-client==1.9.8

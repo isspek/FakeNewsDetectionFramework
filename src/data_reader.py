@@ -7,6 +7,7 @@ import random
 import csv
 import json
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 DATA_DIR = Path('data')
 FOLD = 5
@@ -28,6 +29,76 @@ def read_constraint_splits():
         'val': val,
         'test': test
     }
+
+
+def read_constraint(data_path):
+    data_dir = Path(data_path)
+    train_fpath = data_dir / 'train.tsv'
+    val_fpath = data_dir / 'val.tsv'
+    test_fpath = data_dir / 'groundtruth.tsv'
+    train = pd.read_csv(train_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    val = pd.read_csv(val_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    test = pd.read_csv(test_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+
+    return train[train.label == 'fake']['tweet'].tolist() + val[val.label == 'fake']['tweet'].tolist() + \
+           test[test.label == 'fake']['tweet'].tolist()
+
+
+def read_constraint(data_path, target='fake'):
+    data_dir = Path(data_path)
+    train_fpath = data_dir / 'train.tsv'
+    val_fpath = data_dir / 'val.tsv'
+    test_fpath = data_dir / 'groundtruth.tsv'
+    train = pd.read_csv(train_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    val = pd.read_csv(val_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+    test = pd.read_csv(test_fpath, quoting=csv.QUOTE_NONE, error_bad_lines=False, sep='\t')
+
+    print('Train set: ')
+    print(train.groupby(['label']).count())
+    print('Val set: ')
+    print(val.groupby(['label']).count())
+    print('Test set: ')
+    print(test.groupby(['label']).count())
+
+    return train[train.label == target]['tweet'].tolist() + val[val.label == target]['tweet'].tolist() + \
+           test[test.label == target]['tweet'].tolist()
+
+
+def read_coaid(data_path, target='fake'):
+    data_dir = Path(data_path)
+    train_fpath = data_dir / 'train.tsv'
+    test_fpath = data_dir / 'test.tsv'
+    val_fpath = data_dir / 'val.tsv'
+    train = pd.read_csv(train_fpath, sep='\t')
+    test = pd.read_csv(test_fpath, sep='\t')
+    val = pd.read_csv(val_fpath, sep='\t')
+
+    train.dropna(subset=['content'], inplace=True)
+    test.dropna(subset=['content'], inplace=True)
+    val.dropna(subset=['content'], inplace=True)
+
+    print('Train set: ')
+    print(train.groupby(['label']).count())
+    print('Val set: ')
+    print(val.groupby(['label']).count())
+    print('Test set: ')
+    print(test.groupby(['label']).count())
+
+
+    return train[train['label'] == target]['content'].tolist() + test[test['label'] == target]['content'].tolist() + \
+           val[val['label'] == target]['content'].tolist()
+
+
+def read_covid_tweets(data_path, target='fake'):
+    data_dir = Path(data_path)
+    test_fpath = data_dir / 'test.tsv'
+    test = pd.read_csv(test_fpath, sep='\t')
+
+    print('Test set: ')
+    print(test.groupby(['label']).count())
+
+
+    return test[test['label'] == target]['content'].tolist()
 
 
 def normalize(domain):
@@ -288,24 +359,204 @@ def process_healthreview(dataset_path: str):
     logger.info(f"Merged data is saved to {processed_file}")
 
 
+def handle_date(date):
+    date = pd.to_datetime(date, errors='coerce')
+    if type(date) == pd.NaT:
+        return None
+    else:
+        return f"{date.year}-{date.month}-{date.day}"
+
+
+def split_train_test(data, seed=None):
+    print(len(data))
+    if 'publish_date' in data.columns:
+        data = data.sort_values(by='publish_date', ascending=True)
+        test_index = round(len(data) * 0.6) + 1
+        train_index = len(data) - test_index
+        train = data[:train_index + 1]
+
+        test = data.drop(train.index)
+        val_index = test_index - test_index // 2
+        # TODO add val split
+        val = test[:val_index + 1]
+        test = test[val_index + 1:]
+
+    else:
+        train, test = train_test_split(data, test_size=0.6, random_state=seed, stratify=data.label)
+        val, test = train_test_split(test, test_size=0.5, random_state=seed, stratify=test.label)
+
+    assert len(train) > len(test) and len(train) > len(val)
+    assert len(train) + len(test) + len(val) == len(data)
+
+    return train, val, test
+
+
+def process_coaid(args):
+    logger.info("Processing CoAID Dataset")
+    coaid_dir = Path(args.path)
+    doc_type = args.doc_type
+    seed = args.seed
+
+    coaid_all = []
+    if doc_type == 'article':
+        coaid_all = read_coaid_articles(coaid_dir)
+        coaid_all = pd.concat(coaid_all)
+        coaid_all = coaid_all[['url', 'content', 'title', 'label']]
+
+    elif doc_type == 'claims':
+        coaid_all = read_coaid_claims(coaid_dir)
+        coaid_all = read_coaid_articles(coaid_dir)
+        coaid_all = pd.concat(coaid_all)
+        coaid_all['content'] = coaid_all['title']
+        coaid_all = coaid_all[['url', 'content', 'title', 'label']]
+
+    coaid_all.dropna(subset=['content'], inplace=True)
+    coaid_all.drop_duplicates(inplace=True)
+
+    train, val, test = split_train_test(coaid_all, seed)
+
+    logger.info("Train Stats")
+    logger.info(train.groupby(['label'])['title'].count())
+    logger.info("Val Stats")
+    logger.info(val.groupby(['label'])['title'].count())
+    logger.info("Test Stats")
+    logger.info(test.groupby(['label'])['title'].count())
+
+    saved_path = coaid_dir / doc_type
+    saved_path.mkdir(parents=True, exist_ok=True)
+    train.to_csv(saved_path / 'train.tsv', sep='\t', index=False)
+    test.to_csv(saved_path / 'test.tsv', sep='\t', index=False)
+    val.to_csv(saved_path / 'val.tsv', sep='\t', index=False)
+
+
+def process_covid_tweet(args):
+    logger.info("Processing Covid Tweet Dataset")
+    covid_tweets = Path(args.path) / 'covid19_infodemic_english_data.tsv'
+
+    tweets = pd.read_csv(covid_tweets, sep='\t')
+
+    tweets_fake = tweets[(tweets['q2_label'] == '5_yes_definitely_contains_false_info') | (
+            tweets['q2_label'] == '4_yes_probably_contains_false_info')]
+    tweets_fake['label'] = 'fake'
+    tweets_real = tweets[(tweets['q2_label'] == '2_no_probably_contains_no_false_info') | (
+            tweets['q2_label'] == '1_no_definitely_contains_no_false_info')]
+    tweets_real['label'] = 'true'
+
+    test = pd.concat([tweets_real, tweets_fake])
+    test.dropna(subset=['label'], inplace=True)
+    test.drop_duplicates(inplace=True)
+    test.rename(columns={"text": "content"},
+                inplace=True)
+
+    logger.info("Test Stats")
+    logger.info(test.groupby(['label'])['content'].count())
+
+    saved_path = Path(args.path)
+    test.to_csv(saved_path / 'test.tsv', sep='\t', index=False)
+
+
+def read_coaid_articles(coaid_dir):
+    coaid_all = []
+    for filepath in coaid_dir.rglob("NewsFakeCOVID-19.csv"):
+        data = pd.read_csv(filepath, sep=',')
+        data = data[data['type'] == 'article']
+        data['publish_date'] = data.publish_date.apply(
+            lambda x: handle_date(x))
+        data["label"] = "fake"
+        data.rename(columns={"news_url": "url"},
+                    inplace=True)
+        coaid_all.append(data)
+    for filepath in coaid_dir.rglob("NewsRealCOVID-19.csv"):
+        data = pd.read_csv(filepath, sep=',')
+        data = data[data['type'] == 'article']
+        data['publish_date'] = data.publish_date.apply(
+            lambda x: handle_date(x))
+        data["label"] = "true"
+        data.rename(columns={"news_url": "url"},
+                    inplace=True)
+        coaid_all.append(data)
+    return coaid_all
+
+
+def read_coaid_claims(coaid_dir):
+    coaid_all = []
+    for filepath in coaid_dir.rglob("ClaimFakeCOVID-19.csv"):
+        data = pd.read_csv(filepath, sep=',')
+        data["label"] = "fake"
+        data.rename(columns={"news_url": "url"},
+                    inplace=True)
+        coaid_all.append(data)
+    for filepath in coaid_dir.rglob("ClaimRealCOVID-19.csv"):
+        data = pd.read_csv(filepath, sep=',')
+        data["label"] = "true"
+        data.rename(columns={"news_url": "url"},
+                    inplace=True)
+        coaid_all.append(data)
+    return coaid_all
+
+
+def process_diabetes():
+    pass
+
+
+def process_recovery(args):
+    recovery_path = Path(args.path)
+    doc_type = args.doc_type
+    if doc_type == 'article':
+        recovery_dir = recovery_path / 'recovery-news-data.csv'
+        data = pd.read_csv(recovery_dir, sep=',')
+        data = data[['url', 'title', 'publisher', 'publish_date', 'body_text', 'reliability']]
+        data.loc[data.reliability == 0, 'reliability'] = 'fake'
+        data.loc[data.reliability == 1, 'reliability'] = 'true'
+        data.rename(columns={"body_text": "content", "reliability": "label", "publisher": "source"}, inplace=True)
+        data = data[['url', 'title', 'content', 'publish_date', 'label']]
+        logger.info("Recovery News Stats")
+        logger.info(data.groupby(['label'])['content'].count())
+        data.dropna(subset=['content'], inplace=True)
+        data.drop_duplicates(inplace=True)
+        train, val, test = split_train_test(data)
+
+    logger.info("Train Stats")
+    logger.info(train.groupby(['label'])['title'].count())
+    logger.info("Val Stats")
+    logger.info(val.groupby(['label'])['title'].count())
+    logger.info("Test Stats")
+    logger.info(test.groupby(['label'])['title'].count())
+
+    saved_path = recovery_path / doc_type
+    saved_path.mkdir(parents=True, exist_ok=True)
+
+    train.to_csv(saved_path / 'train.tsv', sep='\t', index=False)
+    val.to_csv(saved_path / 'val.tsv', sep='\t', index=False)
+    test.to_csv(saved_path / 'test.tsv', sep='\t', index=False)
+
+
+PROCESS_DATASETS = {
+    'fakehealth': process_fakehealth,
+    'healthreview': process_healthreview,
+    'coaid': process_coaid,
+    'recovery': process_recovery,
+    'covid_tweets': process_covid_tweet
+}
+
+DATA_READER = {
+    'constraint': read_constraint,
+    'coaid': read_coaid,
+    'recovery': read_coaid,
+    'covid_tweets': read_covid_tweets
+}
+
 if __name__ == '__main__':
     parser = ArgumentParser()
 
     # NELA settings
-    parser.add_argument('--nela_2018', type=str)
-    parser.add_argument('--nela_2019', type=str)
-    parser.add_argument('--fakehealth', type=str)
-    parser.add_argument('--healthreview', type=str)
+    # parser.add_argument('--nela_2018', type=str)
+    # parser.add_argument('--nela_2019', type=str)
+    parser.add_argument('--data', type=str)
+    parser.add_argument('--path', type=str)
+    parser.add_argument('--doc_type', type=str)
+    parser.add_argument('--seed', default=None, type=int)
 
     args = parser.parse_args()
-
-    if args.nela_2018 and args.nela_2019:
-        process_nela(args.nela_2018, args.nela_2019)
-
-    if args.fakehealth:
-        logger.info('Processing Fakehealth datasets...')
-        process_fakehealth(args.fakehealth)
-
-    if args.healthreview:
-        logger.info('Processing Healthreview dataset...')
-        process_healthreview(args.healthreview)
+    logger.info(f'Processing {args.data}')
+    PROCESS_DATASETS[args.data](args)

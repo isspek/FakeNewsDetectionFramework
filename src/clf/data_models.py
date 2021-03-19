@@ -9,7 +9,9 @@ from src.logger import logger
 from cleantext import clean
 import csv
 import json
+import gensim
 from tqdm import tqdm
+from src.pk import topics_explorer
 
 
 def clean_helper(text):
@@ -42,7 +44,7 @@ class Constraint(pl.LightningDataModule):
         if isinstance(args, tuple): args = args[0]
         self.hparams = args
         self.tokenizer = AutoTokenizer.from_pretrained(self.hparams.model_name_or_path)
-        self.labels2id = {'fake': 0, 'real': 1}
+        self.labels2id = {'fake': 0, 'real': 1, 'true': 1}
         self.id2labels = {val: key for key, val in self.labels2id.items()}
 
     def encode_for_transformer(self, tweets, claims=None):
@@ -91,7 +93,7 @@ class Constraint(pl.LightningDataModule):
         return DataLoader(
             self.test_dataset,
             sampler=SequentialSampler(self.test_dataset),
-            batch_size=self.hparams.eval_batch_size,
+            batch_size=self.hparams.test_batch_size,
             shuffle=False)
 
     def encode_history(self, train_df, train_history_df):
@@ -113,15 +115,43 @@ class Constraint(pl.LightningDataModule):
         past = torch.stack(past)
         return past
 
-    def encode_post(self, train_df):
+    def encode_historyv2(self, train_df, train_history_df):
+        past = []
+        for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
+            similar_false_claims = train_history_df[train_history_df['tweet_id'] == i]
+            similar_false_claims = similar_false_claims.fillna('')
+            similar_false_claims = similar_false_claims['title'].to_numpy() + similar_false_claims['content'].to_numpy()
+            claims = []
+            for claim in similar_false_claims:
+                cleaned_claim = clean_helper(claim)
+                input_ids, attention_mask = self.encode_for_transformer(cleaned_claim, row)
+                claims.append(torch.stack((input_ids, attention_mask)))
+            if len(claims) < NUM_OF_PAST_CLAIMS:
+                for _ in range(NUM_OF_PAST_CLAIMS - len(claims)):
+                    input_ids, attention_mask = self.encode_for_transformer('', row)
+                    claims.append(torch.stack((input_ids, attention_mask)))
+            past.append(torch.stack(claims))
+        past = torch.stack(past)
+        return past
+
+    def encode_post(self, train_df, col_name='tweet'):
         post = []
         for i, row in tqdm(train_df.iterrows(), total=len(train_df)):
-            tweet = row.tweet
+            tweet = row[col_name]
             cleaned_tweet = clean_helper(tweet)
             input_ids, attention_mask = self.encode_for_transformer(cleaned_tweet)
             post.append(torch.stack((input_ids, attention_mask)))
         post = torch.stack(post)
         return post
+
+    def extract_topics(self, df, topic_model, vocabulary, col_name='tweet'):
+        topics = []
+        for i, row in tqdm(df.iterrows(), total=len(df)):
+            tweet = row[col_name]
+            topic_vector = topics_explorer.topic_embed(tweet, topic_model, vocabulary)
+            topics.append(torch.from_numpy(topic_vector).float())
+        topics = torch.stack(topics)
+        return topics
 
     def extract_simple_wiki_feature(self, train_df, train_links):
         simple_wiki_data = []
@@ -166,33 +196,85 @@ class Constraint(pl.LightningDataModule):
         return reliability_data
 
 
-
 class Style(Constraint):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def setup(self, stage=None):
         if self.hparams.train_path:
-            train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                   delimiter='\t')
-            post_data = self.encode_post(train_df)
+            if self.hparams.data == 'recovery':
+                train_df = pd.read_csv(self.hparams.train_path, delimiter='\t')
+            else:
+                train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                       delimiter='\t')
+            post_data = self.encode_post(train_df, self.hparams.col_name)
             train_labels = train_df.label.tolist()
             labels = torch.tensor([self.labels2id[i] for i in train_labels])
             self.train_dataset = TensorDataset(post_data, labels)
 
         if self.hparams.val_path:
-            val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                 delimiter='\t')
-            post_data = self.encode_post(val_df)
+            if self.hparams.data == 'recovery':
+                val_df = pd.read_csv(self.hparams.val_path, delimiter='\t')
+            else:
+                val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                     delimiter='\t')
+            post_data = self.encode_post(val_df, self.hparams.col_name)
             val_labels = val_df.label.tolist()
             labels = torch.tensor([self.labels2id[i] for i in val_labels])
             self.val_dataset = TensorDataset(post_data, labels)
 
         if self.hparams.test_path:
-            test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                  delimiter='\t')
-            post_data = self.encode_post(test_df)[2130:2132]
+            if self.hparams.data == 'recovery':
+                test_df = pd.read_csv(self.hparams.test_path, delimiter='\t')
+            else:
+                test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                      delimiter='\t')
+            post_data = self.encode_post(test_df, self.hparams.col_name)
             self.test_dataset = TensorDataset(post_data)
+
+
+class TopicStyle(Constraint):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup(self, stage=None):
+        topic_model_path = 'data/ffakenews_topics.model'
+        topic_model = gensim.models.LdaModel.load(topic_model_path)
+        vocabulary = topic_model.id2word
+        if self.hparams.train_path:
+            if self.hparams.data == 'recovery':
+                train_df = pd.read_csv(self.hparams.train_path, delimiter='\t')
+            else:
+                train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                       delimiter='\t')
+            post_data = self.encode_post(train_df, self.hparams.col_name)
+            train_labels = train_df.label.tolist()
+            labels = torch.tensor([self.labels2id[i] for i in train_labels])
+            topics = self.extract_topics(train_df, topic_model, vocabulary, self.hparams.col_name)
+            self.train_dataset = TensorDataset(post_data, topics, labels)
+
+        if self.hparams.val_path:
+            if self.hparams.data == 'recovery':
+                val_df = pd.read_csv(self.hparams.val_path, delimiter='\t')
+            else:
+                val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                     delimiter='\t')
+            post_data = self.encode_post(val_df, self.hparams.col_name)
+            val_labels = val_df.label.tolist()
+            labels = torch.tensor([self.labels2id[i] for i in val_labels])
+            topics = self.extract_topics(val_df, topic_model, vocabulary, self.hparams.col_name)
+            self.val_dataset = TensorDataset(post_data, topics, labels)
+
+        if self.hparams.test_path:
+            if self.hparams.data == 'recovery':
+                test_df = pd.read_csv(self.hparams.test_path, delimiter='\t')
+            else:
+                test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                      delimiter='\t')
+            post_data = self.encode_post(test_df, self.hparams.col_name)
+            topics = self.extract_topics(test_df, topic_model, vocabulary, self.hparams.col_name)
+            self.test_dataset = TensorDataset(post_data, topics)
+
 
 class History(Constraint):
     def __init__(self, *args, **kwargs):
@@ -227,6 +309,7 @@ class History(Constraint):
             past = self.encode_history(test_df, test_history_df)
             post = self.encode_post(test_df)
             self.test_dataset = TensorDataset(past, post)
+
 
 class Links(Constraint):
     def __init__(self, *args, **kwargs):
@@ -292,31 +375,83 @@ class HistoryStyle(Constraint):
 
     def setup(self, stage=None):
         if self.hparams.train_path:
-            train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                   delimiter='\t')
+            if self.hparams.data == 'recovery':
+                train_df = pd.read_csv(self.hparams.train_path, delimiter='\t')
+            else:
+                train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                       delimiter='\t')
+            post_data = self.encode_post(train_df, self.hparams.col_name)
             train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
-            post_data = self.encode_post(train_df)
             history = self.encode_history(train_df, train_history_df)
             train_labels = train_df.label.tolist()
             labels = torch.tensor([self.labels2id[i] for i in train_labels])
             self.train_dataset = TensorDataset(history, post_data, labels)
 
         if self.hparams.val_path:
-            val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                 delimiter='\t')
+            if self.hparams.data == 'recovery':
+                val_df = pd.read_csv(self.hparams.val_path, delimiter='\t')
+            else:
+                val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                     delimiter='\t')
+            post_data = self.encode_post(val_df, self.hparams.col_name)
             val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
-            post_data = self.encode_post(val_df)
             history = self.encode_history(val_df, val_history_df)
             val_labels = val_df.label.tolist()
             labels = torch.tensor([self.labels2id[i] for i in val_labels])
             self.val_dataset = TensorDataset(history, post_data, labels)
 
         if self.hparams.test_path:
-            test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
-                                  delimiter='\t')
+            if self.hparams.data == 'recovery':
+                test_df = pd.read_csv(self.hparams.test_path, delimiter='\t')
+            else:
+                test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                      delimiter='\t')
+            post_data = self.encode_post(test_df, self.hparams.col_name)
             test_history_df = pd.read_csv(self.hparams.history_test_path, sep='\t')
-            post_data = self.encode_post(test_df)
             history = self.encode_history(test_df, test_history_df)
+            self.test_dataset = TensorDataset(history, post_data)
+
+
+class HistoryStyleV2(Constraint):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup(self, stage=None):
+        if self.hparams.train_path:
+            if self.hparams.data == 'recovery':
+                train_df = pd.read_csv(self.hparams.train_path, delimiter='\t')
+            else:
+                train_df = pd.read_csv(self.hparams.train_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                       delimiter='\t')
+            post_data = self.encode_post(train_df, self.hparams.col_name)
+            train_history_df = pd.read_csv(self.hparams.history_train_path, sep='\t')
+            history = self.encode_historyv2(train_df, train_history_df)
+            train_labels = train_df.label.tolist()
+            labels = torch.tensor([self.labels2id[i] for i in train_labels])
+            self.train_dataset = TensorDataset(history, post_data, labels)
+
+        if self.hparams.val_path:
+            if self.hparams.data == 'recovery':
+                val_df = pd.read_csv(self.hparams.val_path, delimiter='\t')
+            else:
+                val_df = pd.read_csv(self.hparams.val_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                     delimiter='\t')
+            post_data = self.encode_post(val_df, self.hparams.col_name)
+            val_history_df = pd.read_csv(self.hparams.history_val_path, sep='\t')
+            history = self.encode_historyv2(val_df, val_history_df)
+            val_labels = val_df.label.tolist()
+            labels = torch.tensor([self.labels2id[i] for i in val_labels])
+            self.val_dataset = TensorDataset(history, post_data, labels)
+
+        if self.hparams.test_path:
+            if self.hparams.data == 'recovery':
+                test_df = pd.read_csv(self.hparams.test_path, delimiter='\t')
+            else:
+                test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
+                                      delimiter='\t')
+            post_data = self.encode_post(test_df, self.hparams.col_name)
+            test_history_df = pd.read_csv(self.hparams.history_test_path, sep='\t')
+            history = self.encode_historyv2(test_df, test_history_df)
             self.test_dataset = TensorDataset(history, post_data)
 
 
@@ -429,7 +564,7 @@ class HistoryLinks(Links):
             val_labels = val_df.label.tolist()
             labels = torch.tensor([self.labels2id[i] for i in val_labels])
             post = self.encode_post(val_df)
-            self.val_dataset = TensorDataset(history, post,  simple_wiki_data, reliability_data, labels)
+            self.val_dataset = TensorDataset(history, post, simple_wiki_data, reliability_data, labels)
 
         if self.hparams.test_path:
             test_df = pd.read_csv(self.hparams.test_path, quoting=csv.QUOTE_NONE, error_bad_lines=False,
@@ -440,14 +575,16 @@ class HistoryLinks(Links):
             reliability_data = self.extract_reliability_feature(test_df, test_links)
             history = self.encode_history(test_df, test_history_df)
             post = self.encode_post(test_df)
-            self.test_dataset = TensorDataset(history,post, simple_wiki_data, reliability_data)
+            self.test_dataset = TensorDataset(history, post, simple_wiki_data, reliability_data)
 
 
 DATA_MODELS = {
     'style': Style,
     'history': History,
     'links': Links,
+    'topic_style': TopicStyle,
     'history_style': HistoryStyle,
+    'history_style_v2': HistoryStyleV2,
     'history_links': HistoryLinks,
     'history_links_style': HistoryStyleLinks,
     'links_style': LinksStyle
