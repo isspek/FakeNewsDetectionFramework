@@ -16,12 +16,13 @@ The list of additional datasets for training/testing some of the components of t
 
 # Citation
 Please use the following citation if you use our code:
-
-`@misc{baris2021ecol,
+```bibtex
+@chapter{baris2021ecol,
       title={ECOL: Early Detection of COVID Lies Using Content, Prior Knowledge and Source Information}, 
       author={Ipek Baris and Zeyd Boukhers},
       year={2021},
-      eprint={2101.05499},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
-}`
+      book={Combating Online Hostile Posts in Regional Languages during Emergency Situation },
+      publisher={Springer International Publishing},
+}
+```
+Preprint version of the [paper](https://arxiv.org/abs/2101.05499) is publicly available. 
